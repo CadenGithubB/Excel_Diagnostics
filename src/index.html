@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--CSP-->
+<meta name="referrer" content="no-referrer">
+<title>Excel diagnostics viewer</title>
+<meta name="description" content="Search and filter the logs collected by excel_diagnostics.sh, entirely in your browser. Nothing is uploaded.">
+<style>
+/*CSS*/
+</style>
+</head>
+<body>
+
+<main id="landing">
+  <div class="card">
+    <h1>Excel diagnostics viewer</h1>
+    <p class="lead">Search, filter and line up everything in a bundle collected by <code>excel_diagnostics.sh</code>, without the logs leaving this computer.</p>
+    <div id="loadError" role="alert" hidden></div>
+    <div class="dropzone">
+      <strong>Drop an Excel_Diagnostics_….zip here</strong>
+      <span class="dim">or the unzipped folder, or individual log files</span>
+      <div class="acts">
+        <button class="primary" id="btnFiles">Choose a zip or log files</button>
+        <button id="btnDir">Choose a folder</button>
+        <button id="btnSample">Try it with sample data</button>
+      </div>
+      <input type="file" id="pickFiles" multiple hidden>
+      <input type="file" id="pickDir" webkitdirectory hidden>
+    </div>
+    <ul class="facts">
+      <li><b>Nothing is uploaded.</b> The page has no server side, and its security policy blocks every network request, so it could not send the logs anywhere. You can save this page and use it offline.</li>
+      <li><b>One timeline.</b> The macOS unified log, Excel's own diagnostics, AutoUpdate, OneDrive, install history, sleep and wake, and each crash or hang report are merged by time and shown in the Mac's own time zone.</li>
+      <li><b>Large captures are fine.</b> Logs are read from disk as you search instead of being loaded into memory. A bundle over about 1 GB opens fastest from its unzipped folder.</li>
+    </ul>
+  </div>
+</main>
+
+<div id="progress" hidden>
+  <div id="progText">Opening</div>
+  <div class="bar"><div id="progBar"></div></div>
+  <div id="progNum" class="dim"></div>
+</div>
+
+<div id="app" hidden>
+  <header class="top">
+    <span class="brand">Excel diagnostics viewer</span>
+    <span id="bundleName"></span>
+    <nav class="tabs" aria-label="Views">
+      <button data-tab="timeline" class="on">Timeline</button>
+      <button data-tab="files">Files</button>
+      <button data-tab="overview">Overview</button>
+      <button data-tab="memory" hidden>Memory</button>
+    </nav>
+    <span class="spacer"></span>
+    <label>Times in
+      <select id="tz">
+        <option value="bundle">the Mac's time zone</option>
+        <option value="utc">UTC</option>
+        <option value="browser">this computer's time zone</option>
+      </select>
+    </label>
+    <button id="openAnother">Open another</button>
+  </header>
+
+  <section id="tab-timeline">
+    <div class="toolbar">
+      <button id="facetToggle" title="Show or hide the filter list" aria-label="Show or hide the filter list">☰</button>
+      <input id="q" type="search" spellcheck="false" autocomplete="off" aria-label="Search" placeholder='Search: words, "a phrase", /regex/, -exclude, process:excel, level:error'>
+      <label class="chk"><input type="checkbox" id="caseSens"> Match case</label>
+      <button id="help" title="Search syntax and keyboard shortcuts" aria-label="Search help">?</button>
+      <span id="count" aria-live="polite"></span>
+      <span class="spacer"></span>
+      <button id="prevErr" title="Previous error or fault (Shift+E)">↑ Error</button>
+      <button id="nextErr" title="Next error or fault (E)">↓ Error</button>
+      <button id="pinnedOnly" title="Show only pinned entries" disabled>★ Pinned (0)</button>
+      <button id="export" title="Download the entries shown as a tab-separated file">Export</button>
+      <button id="clear" title="Remove the search text and every filter (C)" disabled>Clear filters</button>
+      <div id="searchbar" hidden><div></div></div>
+    </div>
+    <div id="banner" hidden><span id="bannerText"></span><button id="bannerAll">Show all time</button><span class="spacer"></span><button id="bannerClose" aria-label="Dismiss">✕</button></div>
+    <div class="histwrap">
+      <div class="histhead">
+        <span><i class="be"></i>Errors and faults</span><span><i class="bw"></i>Warnings</span><span><i class="bo"></i>Everything else</span>
+        <span class="spacer"></span>
+        <span class="dim">Drag across the chart to zoom</span>
+        <input id="tFrom" type="text" aria-label="Window start" spellcheck="false">
+        <span>to</span>
+        <input id="tTo" type="text" aria-label="Window end" spellcheck="false">
+        <span id="tzNote"></span>
+        <button id="zoomOut">Zoom out</button>
+        <button id="allTime">All time</button>
+      </div>
+      <div id="hist"></div>
+      <div id="histTip" hidden></div>
+    </div>
+    <div class="main">
+      <aside id="facets" aria-label="Filters"></aside>
+      <div class="tablewrap">
+        <div class="thead"><span>Time</span><span>Severity</span><span>Source</span><span>Process</span><span>Message</span></div>
+        <div id="vs" tabindex="0" aria-label="Log entries"><div id="rows"></div><div id="spacer"></div></div>
+        <div id="empty" hidden>Nothing matches. Loosen the search, clear a filter, or widen the time window.</div>
+        <div id="noRows" hidden>No timestamped logs were found in this bundle. Its files are listed under Files.</div>
+        <div id="detail" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-files" hidden>
+    <div class="treewrap">
+      <input id="treeFilter" type="search" placeholder="Filter files by name" aria-label="Filter files by name">
+      <div id="tree"></div>
+    </div>
+    <div id="fileview"><p class="dim">Choose a file. Files marked with a dot are on the timeline.</p></div>
+  </section>
+
+  <section id="tab-overview" hidden><div class="pad" id="overview"></div></section>
+  <section id="tab-memory" hidden><div class="pad" id="memory"></div></section>
+</div>
+
+<div id="flash" role="status" hidden></div>
+
+<dialog id="helpDlg">
+  <h2>Searching</h2>
+  <table>
+    <tr><td><code>pivot filter</code></td><td>Entries containing both words, anywhere on the line. Case is ignored unless Match case is on.</td></tr>
+    <tr><td><code>"exceeded mem limit"</code></td><td>An exact phrase.</td></tr>
+    <tr><td><code>/jetsam|memorystatus/</code></td><td>A regular expression.</td></tr>
+    <tr><td><code>-runningboardd</code></td><td>Leave out entries containing this. Works with phrases, regexes and fields too.</td></tr>
+    <tr><td><code>process:excel</code></td><td>Process name contains "excel". Also <code>level:</code> <code>pid:</code> <code>subsystem:</code> <code>category:</code> <code>tag:</code> <code>source:</code></td></tr>
+  </table>
+  <p>The list on the left filters by severity, source, tag and process: click a value to show only it, or its − to hide it. The counts beside the other values show what choosing them would give.</p>
+  <h2>Keys</h2>
+  <table>
+    <tr><td><code>/</code></td><td>Go to the search box</td></tr>
+    <tr><td><code>↑ ↓</code> or <code>k j</code></td><td>Move between entries; <code>Enter</code> opens the details, <code>Esc</code> closes them</td></tr>
+    <tr><td><code>e</code> / <code>Shift+E</code></td><td>Next / previous error or fault</td></tr>
+    <tr><td><code>p</code></td><td>Pin or unpin the selected entry</td></tr>
+    <tr><td><code>c</code></td><td>Clear the filters but stay on the selected entry, to see what happened around it</td></tr>
+  </table>
+  <form method="dialog" style="text-align:right;margin-top:14px"><button class="primary">Close</button></form>
+</dialog>
+
+<script id="core-src" type="text/plain">
+/*CORE*/
+</script>
+<script>
+/*APP*/
+</script>
+</body>
+</html>

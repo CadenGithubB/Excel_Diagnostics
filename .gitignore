@@ -1,0 +1,7 @@
+.claude/
+.DS_Store
+dev.html
+# Collected bundles hold real usernames, paths and device identifiers. Never commit one.
+Excel_Diagnostics_*/
+Excel_Diagnostics_*.zip
+Excel_Diagnostics_*.sha256

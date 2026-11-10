@@ -1,0 +1,2177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; worker-src blob:; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Excel diagnostics viewer</title>
+<meta name="description" content="Search and filter the logs collected by excel_diagnostics.sh, entirely in your browser. Nothing is uploaded.">
+<style>
+:root {
+  color-scheme: light dark;
+  --plane: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781;
+  --hair: #e1e0d9; --axis: #c3c2b7; --border: rgba(11, 11, 11, .12); --accent: #2a78d6; --sel: #dfeaf9; --wash: rgba(11, 11, 11, .045);
+  --critical: #d03b3b; --warning: #fab219; --other: #b5b4ac; --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a;
+  --mark: #ffe27a; --markink: #0b0b0b;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --plane: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781;
+    --hair: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, .13); --accent: #3987e5; --sel: #1c324e; --wash: rgba(255, 255, 255, .06);
+    --other: #5e5d58; --c1: #3987e5; --c2: #d95926; --c3: #199e70; --mark: #6f5400; --markink: #fff;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--plane); color: var(--ink); font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+[hidden] { display: none !important; }
+button, input, select { font: inherit; color: inherit; }
+button { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { background: var(--wash); }
+button:disabled { opacity: .45; cursor: default; }
+button.on { background: var(--sel); border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; padding: 7px 14px; font-weight: 600; }
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+input[type=search], input[type=text], select { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+a { color: var(--accent); cursor: pointer; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre { font-family: var(--mono); font-size: 12px; }
+code { background: var(--wash); border-radius: 4px; padding: 1px 4px; }
+.dim { color: var(--ink2); }
+.spacer { flex: 1; }
+h2 { font-size: 14px; margin: 22px 0 8px; }
+
+/* landing */
+#landing { min-height: 100%; display: flex; align-items: center; justify-content: center; padding: 24px 16px; }
+.card { width: min(680px, 100%); }
+.card h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -.01em; }
+.card .lead { font-size: 15px; color: var(--ink2); margin: 0 0 20px; }
+.dropzone { border: 2px dashed var(--axis); border-radius: 12px; background: var(--surface); padding: 30px 20px; text-align: center; }
+body.drag .dropzone, body.drag #app { outline: 3px solid var(--accent); outline-offset: -3px; }
+.dropzone strong { display: block; font-size: 16px; margin-bottom: 4px; }
+.dropzone .acts { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 16px; }
+.dropzone .acts button { padding: 7px 14px; }
+.facts { margin: 18px 0 0; padding: 0; list-style: none; color: var(--ink2); }
+.facts li { margin: 8px 0; padding-left: 14px; border-left: 2px solid var(--hair); }
+.facts b { color: var(--ink); }
+#loadError { background: color-mix(in srgb, var(--critical) 12%, var(--surface)); border: 1px solid var(--critical); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; }
+#progress { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; }
+#progText { max-width: 90vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar { width: min(460px, 90vw); height: 6px; border-radius: 3px; background: var(--hair); overflow: hidden; }
+.bar > div { height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
+
+/* app frame */
+#app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+.top { display: flex; align-items: center; gap: 12px; padding: 7px 12px; border-bottom: 1px solid var(--hair); background: var(--surface); flex-wrap: wrap; }
+.brand { font-weight: 650; }
+#bundleName { color: var(--ink2); max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tabs { display: flex; gap: 2px; }
+.tabs button { border-color: transparent; background: none; padding: 4px 10px; }
+.tabs button.on { background: var(--sel); border-color: transparent; font-weight: 600; }
+#app > section { flex: 1; min-height: 0; }
+
+/* timeline */
+#tab-timeline { display: flex; flex-direction: column; }
+.toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px 6px; flex-wrap: wrap; position: relative; }
+#q { flex: 1 1 320px; min-width: 200px; padding: 6px 10px; font-family: var(--mono); font-size: 12px; }
+.chk { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+#count { color: var(--ink2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#count.err { color: var(--critical); white-space: normal; }
+#searchbar { position: absolute; left: 12px; right: 12px; bottom: 0; height: 2px; background: var(--hair); }
+#searchbar > div { height: 100%; background: var(--accent); width: 0; }
+#banner { display: flex; align-items: center; gap: 8px; margin: 0 12px 6px; padding: 5px 10px; background: var(--sel); border-radius: 6px; flex-wrap: wrap; }
+.histwrap { padding: 0 12px; position: relative; }
+.histhead { display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap; color: var(--ink2); font-size: 12px; margin-bottom: 2px; }
+.histhead i, #histTip i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.histhead input { width: 150px; font-family: var(--mono); font-size: 11.5px; padding: 2px 6px; }
+.histhead button { padding: 1px 8px; font-size: 12px; }
+#hist { height: 92px; cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
+#hist svg, .chart svg { display: block; }
+.bo, i.bo { fill: var(--other); background: var(--other); }
+.bw, i.bw { fill: var(--warning); background: var(--warning); }
+.be, i.be { fill: var(--critical); background: var(--critical); }
+.grid { stroke: var(--hair); stroke-width: 1; }
+.axis { stroke: var(--axis); stroke-width: 1; }
+.tick { fill: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.hov { fill: var(--ink); opacity: .08; pointer-events: none; }
+.brush { fill: var(--accent); opacity: .22; pointer-events: none; }
+#histTip, .chart .tip { position: absolute; top: 20px; z-index: 5; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; box-shadow: 0 4px 14px rgba(0, 0, 0, .14); white-space: nowrap; font-size: 12px; color: var(--ink2); }
+#histTip b, .chart .tip b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.tt { color: var(--ink); font-weight: 600; margin-bottom: 2px; }
+.busy #hist, .busy #vs { opacity: .55; }
+
+.main { flex: 1; min-height: 0; display: flex; border-top: 1px solid var(--hair); margin-top: 4px; }
+#facets { width: 248px; flex: none; overflow-y: auto; border-right: 1px solid var(--hair); padding: 6px 0 20px; background: var(--surface); }
+.nofacets #facets { display: none; }
+#facets details { border-bottom: 1px solid var(--hair); padding: 2px 0 4px; }
+#facets summary, #tree summary { cursor: pointer; padding: 4px 12px; font-weight: 600; user-select: none; }
+#facets summary b { background: var(--accent); color: #fff; border-radius: 9px; padding: 0 6px; margin-left: 6px; font-size: 11px; }
+.fv { display: flex; align-items: center; gap: 6px; padding: 1px 6px 1px 14px; cursor: pointer; }
+.fv:hover { background: var(--wash); }
+.fv .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fv .n { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+.fv .x { padding: 0 6px; line-height: 16px; border-color: transparent; background: none; color: var(--muted); visibility: hidden; }
+.fv:hover .x, .fv.exc .x, .fv .x:focus-visible { visibility: visible; }
+.fv.inc { background: var(--sel); font-weight: 600; }
+.fv.inc .lbl::before { content: "✓ "; color: var(--accent); }
+.fv.exc .lbl { text-decoration: line-through; color: var(--muted); }
+.fv.exc .x { color: var(--critical); }
+.more { color: var(--muted); padding: 4px 14px; font-size: 12px; }
+.fv i, .sv i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; border: 1.5px solid var(--axis); }
+.s5 i, .s4 i { background: var(--critical); border-color: var(--critical); }
+.s3 i { background: var(--warning); border-color: var(--warning); }
+
+.tablewrap { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.thead, .r { display: grid; grid-template-columns: 184px 78px 92px 200px minmax(0, 1fr); }
+.thead { font-size: 11.5px; color: var(--ink2); border-bottom: 1px solid var(--hair); background: var(--surface); padding-right: 14px; }
+.thead span { padding: 3px 8px; overflow: hidden; white-space: nowrap; }
+#vs { flex: 1; min-height: 60px; overflow-y: scroll; overflow-x: hidden; position: relative; outline: none; background: var(--surface); }
+#rows { position: sticky; top: 0; overflow: hidden; }
+.r { height: 22px; line-height: 22px; font-family: var(--mono); font-size: 12px; white-space: nowrap; cursor: default; }
+.r:hover { background: var(--wash); }
+.r.sel { background: var(--sel); }
+.c { overflow: hidden; text-overflow: ellipsis; padding: 0 8px; }
+.c.t { font-variant-numeric: tabular-nums; color: var(--ink2); }
+.c.sv, .c.so, .c.p { font-family: system-ui, sans-serif; }
+.c.so { color: var(--ink2); }
+.c.p u { text-decoration: none; color: var(--muted); margin-left: 5px; font-size: 11px; }
+.r.s5, .r.s4 { box-shadow: inset 3px 0 var(--critical); }
+.r.s3 { box-shadow: inset 3px 0 var(--warning); }
+.r.s5 .sv { font-weight: 700; }
+.r.s0 .m, .r.s0 .sv { color: var(--muted); }
+.r.ph { color: var(--muted); }
+.pin { color: var(--accent); margin-right: 4px; }
+mark { background: var(--mark); color: var(--markink); border-radius: 2px; }
+#empty, #noRows { position: absolute; top: 70px; left: 0; right: 0; text-align: center; color: var(--ink2); pointer-events: none; }
+#flash { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--plane); border-radius: 8px; padding: 6px 14px; z-index: 20; }
+
+#detail { flex: none; max-height: 46%; display: flex; flex-direction: column; border-top: 2px solid var(--axis); background: var(--surface); }
+.dbar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--hair); flex-wrap: wrap; }
+.dbar .grp { display: flex; align-items: center; gap: 4px; color: var(--ink2); margin: 0 4px; }
+.dbody { overflow: auto; display: flex; gap: 6px 22px; padding: 10px 12px 14px; flex-wrap: wrap; }
+.dbody dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; flex: 1 1 320px; max-width: 520px; align-content: start; }
+.dbody dt { color: var(--ink2); }
+.dbody dd { margin: 0; overflow-wrap: anywhere; }
+.dmsg { flex: 3 1 420px; min-width: 0; }
+.dmsg pre, .fbody pre, .doc pre { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dmsg pre.json { background: var(--wash); border-radius: 6px; padding: 8px 10px; }
+.fb { margin-left: 6px; white-space: nowrap; }
+.fb button { padding: 0 6px; line-height: 16px; font-size: 12px; margin-left: 2px; color: var(--ink2); }
+
+/* files, overview, memory */
+#tab-files { display: flex; }
+.treewrap { width: 340px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--hair); background: var(--surface); }
+.treewrap input { margin: 8px; }
+#tree { overflow: auto; flex: 1; padding-bottom: 20px; }
+#tree details details { margin-left: 12px; }
+#tree summary { font-weight: 500; display: flex; gap: 6px; padding: 2px 10px; }
+#tree summary::before { content: "▸"; color: var(--muted); }
+#tree details[open] > summary::before { content: "▾"; }
+#tree .n { color: var(--muted); font-size: 11.5px; margin-left: auto; padding-left: 8px; white-space: nowrap; }
+.tf { display: flex; padding: 1px 10px 1px 26px; color: var(--ink); }
+.tf span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf.src span:first-child::after { content: " ●"; color: var(--accent); font-size: 9px; }
+.tf.on { background: var(--sel); }
+.tf:hover { background: var(--wash); text-decoration: none; }
+#fileview { flex: 1; min-width: 0; overflow: auto; padding: 12px 16px 30px; }
+.fhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.fhead h2 { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.pad { overflow: auto; height: 100%; padding: 14px 20px 40px; }
+.pad > * { max-width: 1100px; }
+.tiles { display: flex; gap: 10px; flex-wrap: wrap; margin: 4px 0 12px; }
+.tiles div { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px; min-width: 150px; }
+.tiles b { display: block; font-size: 22px; font-weight: 600; }
+.tiles span { color: var(--ink2); }
+.note { border-left: 3px solid var(--warning); padding: 2px 10px; color: var(--ink2); }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 3px 12px 3px 0; border-bottom: 1px solid var(--hair); vertical-align: top; }
+th { color: var(--ink2); font-weight: 600; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+#docs details { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin: 10px 0; }
+#docs summary { cursor: pointer; padding: 8px 14px; font-weight: 600; }
+.doc { padding: 0 16px 12px; }
+.doc h3 { font-size: 15px; margin: 8px 0; } .doc h4 { font-size: 13.5px; margin: 14px 0 6px; }
+.chart { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 6px 4px; cursor: crosshair; }
+.legend { display: flex; gap: 16px; padding: 0 10px 6px 50px; color: var(--ink2); font-size: 12px; flex-wrap: wrap; }
+.key { display: inline-block; width: 14px; height: 0; border-top: 2px solid; margin-right: 6px; vertical-align: middle; }
+.ln { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.c1 { stroke: var(--c1); border-color: var(--c1); } .c2 { stroke: var(--c2); border-color: var(--c2); } .c3 { stroke: var(--c3); border-color: var(--c3); }
+.dot { stroke: var(--surface); stroke-width: 2; }
+.dot.c1 { fill: var(--c1); stroke: var(--surface); } .dot.c2 { fill: var(--c2); stroke: var(--surface); } .dot.c3 { fill: var(--c3); stroke: var(--surface); }
+.cross { stroke: var(--axis); stroke-width: 1; }
+.events { padding-left: 18px; }
+dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--ink); max-width: min(640px, 92vw); padding: 18px 22px; }
+dialog::backdrop { background: rgba(0, 0, 0, .35); }
+dialog h2 { margin-top: 0; }
+dialog td:first-child { white-space: nowrap; padding-right: 18px; }
+
+@media (max-width: 820px) {
+  #facets { display: none; }
+  #tab-timeline.nofacets #facets { display: block; position: absolute; z-index: 8; left: 0; top: 0; bottom: 0; box-shadow: 4px 0 18px rgba(0, 0, 0, .25); }
+  .main { position: relative; }
+  .thead, .r { grid-template-columns: 150px 0 0 0 minmax(0, 1fr); }
+  .c.sv, .c.so, .c.p, .thead span:nth-child(n+2):nth-child(-n+4) { padding: 0; }
+  .c.t { font-size: 11px; }
+  #bundleName { display: none; }
+  .treewrap { width: 42%; }
+  .histhead input { width: 136px; }
+  .histhead .dim { display: none; }
+  #detail { max-height: 62%; }
+}
+
+</style>
+</head>
+<body>
+
+<main id="landing">
+  <div class="card">
+    <h1>Excel diagnostics viewer</h1>
+    <p class="lead">Search, filter and line up everything in a bundle collected by <code>excel_diagnostics.sh</code>, without the logs leaving this computer.</p>
+    <div id="loadError" role="alert" hidden></div>
+    <div class="dropzone">
+      <strong>Drop an Excel_Diagnostics_….zip here</strong>
+      <span class="dim">or the unzipped folder, or individual log files</span>
+      <div class="acts">
+        <button class="primary" id="btnFiles">Choose a zip or log files</button>
+        <button id="btnDir">Choose a folder</button>
+        <button id="btnSample">Try it with sample data</button>
+      </div>
+      <input type="file" id="pickFiles" multiple hidden>
+      <input type="file" id="pickDir" webkitdirectory hidden>
+    </div>
+    <ul class="facts">
+      <li><b>Nothing is uploaded.</b> The page has no server side, and its security policy blocks every network request, so it could not send the logs anywhere. You can save this page and use it offline.</li>
+      <li><b>One timeline.</b> The macOS unified log, Excel's own diagnostics, AutoUpdate, OneDrive, install history, sleep and wake, and each crash or hang report are merged by time and shown in the Mac's own time zone.</li>
+      <li><b>Large captures are fine.</b> Logs are read from disk as you search instead of being loaded into memory. A bundle over about 1 GB opens fastest from its unzipped folder.</li>
+    </ul>
+  </div>
+</main>
+
+<div id="progress" hidden>
+  <div id="progText">Opening</div>
+  <div class="bar"><div id="progBar"></div></div>
+  <div id="progNum" class="dim"></div>
+</div>
+
+<div id="app" hidden>
+  <header class="top">
+    <span class="brand">Excel diagnostics viewer</span>
+    <span id="bundleName"></span>
+    <nav class="tabs" aria-label="Views">
+      <button data-tab="timeline" class="on">Timeline</button>
+      <button data-tab="files">Files</button>
+      <button data-tab="overview">Overview</button>
+      <button data-tab="memory" hidden>Memory</button>
+    </nav>
+    <span class="spacer"></span>
+    <label>Times in
+      <select id="tz">
+        <option value="bundle">the Mac's time zone</option>
+        <option value="utc">UTC</option>
+        <option value="browser">this computer's time zone</option>
+      </select>
+    </label>
+    <button id="openAnother">Open another</button>
+  </header>
+
+  <section id="tab-timeline">
+    <div class="toolbar">
+      <button id="facetToggle" title="Show or hide the filter list" aria-label="Show or hide the filter list">☰</button>
+      <input id="q" type="search" spellcheck="false" autocomplete="off" aria-label="Search" placeholder='Search: words, "a phrase", /regex/, -exclude, process:excel, level:error'>
+      <label class="chk"><input type="checkbox" id="caseSens"> Match case</label>
+      <button id="help" title="Search syntax and keyboard shortcuts" aria-label="Search help">?</button>
+      <span id="count" aria-live="polite"></span>
+      <span class="spacer"></span>
+      <button id="prevErr" title="Previous error or fault (Shift+E)">↑ Error</button>
+      <button id="nextErr" title="Next error or fault (E)">↓ Error</button>
+      <button id="pinnedOnly" title="Show only pinned entries" disabled>★ Pinned (0)</button>
+      <button id="export" title="Download the entries shown as a tab-separated file">Export</button>
+      <button id="clear" title="Remove the search text and every filter (C)" disabled>Clear filters</button>
+      <div id="searchbar" hidden><div></div></div>
+    </div>
+    <div id="banner" hidden><span id="bannerText"></span><button id="bannerAll">Show all time</button><span class="spacer"></span><button id="bannerClose" aria-label="Dismiss">✕</button></div>
+    <div class="histwrap">
+      <div class="histhead">
+        <span><i class="be"></i>Errors and faults</span><span><i class="bw"></i>Warnings</span><span><i class="bo"></i>Everything else</span>
+        <span class="spacer"></span>
+        <span class="dim">Drag across the chart to zoom</span>
+        <input id="tFrom" type="text" aria-label="Window start" spellcheck="false">
+        <span>to</span>
+        <input id="tTo" type="text" aria-label="Window end" spellcheck="false">
+        <span id="tzNote"></span>
+        <button id="zoomOut">Zoom out</button>
+        <button id="allTime">All time</button>
+      </div>
+      <div id="hist"></div>
+      <div id="histTip" hidden></div>
+    </div>
+    <div class="main">
+      <aside id="facets" aria-label="Filters"></aside>
+      <div class="tablewrap">
+        <div class="thead"><span>Time</span><span>Severity</span><span>Source</span><span>Process</span><span>Message</span></div>
+        <div id="vs" tabindex="0" aria-label="Log entries"><div id="rows"></div><div id="spacer"></div></div>
+        <div id="empty" hidden>Nothing matches. Loosen the search, clear a filter, or widen the time window.</div>
+        <div id="noRows" hidden>No timestamped logs were found in this bundle. Its files are listed under Files.</div>
+        <div id="detail" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-files" hidden>
+    <div class="treewrap">
+      <input id="treeFilter" type="search" placeholder="Filter files by name" aria-label="Filter files by name">
+      <div id="tree"></div>
+    </div>
+    <div id="fileview"><p class="dim">Choose a file. Files marked with a dot are on the timeline.</p></div>
+  </section>
+
+  <section id="tab-overview" hidden><div class="pad" id="overview"></div></section>
+  <section id="tab-memory" hidden><div class="pad" id="memory"></div></section>
+</div>
+
+<div id="flash" role="status" hidden></div>
+
+<dialog id="helpDlg">
+  <h2>Searching</h2>
+  <table>
+    <tr><td><code>pivot filter</code></td><td>Entries containing both words, anywhere on the line. Case is ignored unless Match case is on.</td></tr>
+    <tr><td><code>"exceeded mem limit"</code></td><td>An exact phrase.</td></tr>
+    <tr><td><code>/jetsam|memorystatus/</code></td><td>A regular expression.</td></tr>
+    <tr><td><code>-runningboardd</code></td><td>Leave out entries containing this. Works with phrases, regexes and fields too.</td></tr>
+    <tr><td><code>process:excel</code></td><td>Process name contains "excel". Also <code>level:</code> <code>pid:</code> <code>subsystem:</code> <code>category:</code> <code>tag:</code> <code>source:</code></td></tr>
+  </table>
+  <p>The list on the left filters by severity, source, tag and process: click a value to show only it, or its − to hide it. The counts beside the other values show what choosing them would give.</p>
+  <h2>Keys</h2>
+  <table>
+    <tr><td><code>/</code></td><td>Go to the search box</td></tr>
+    <tr><td><code>↑ ↓</code> or <code>k j</code></td><td>Move between entries; <code>Enter</code> opens the details, <code>Esc</code> closes them</td></tr>
+    <tr><td><code>e</code> / <code>Shift+E</code></td><td>Next / previous error or fault</td></tr>
+    <tr><td><code>p</code></td><td>Pin or unpin the selected entry</td></tr>
+    <tr><td><code>c</code></td><td>Clear the filters but stay on the selected entry, to see what happened around it</td></tr>
+  </table>
+  <form method="dialog" style="text-align:right;margin-top:14px"><button class="primary">Close</button></form>
+</dialog>
+
+<script id="core-src" type="text/plain">
+'use strict';
+/* Excel diagnostics log viewer - indexing and search core.
+ *
+ * Runs in a Web Worker. Nothing here touches the network: bundles are read with File/Blob APIs only.
+ *
+ * Built to cope with multi-gigabyte logs: log text is never held in JavaScript strings. Each log file
+ * stays a Blob (the file on disk, or a zip member inflated once into a browser-managed Blob), and only a
+ * compact per-row index (time, byte range, level, process, ...) lives in memory. Filters on indexed
+ * columns run on that index; text and regex searches stream the Blobs in 8 MB slices.
+ */
+const Core = (() => {
+  const LATIN1 = new TextDecoder('latin1');     // one character per byte, so string indexes are byte offsets
+  const UTF8 = new TextDecoder('utf-8');
+  const CHUNK = 8 << 20;
+  const SEV = ['Debug', 'Info', 'Notice', 'Warning', 'Error', 'Fault'];
+  const SEV_OF = {
+    debug: 0, verbose: 0, verboseex: 0, vrb: 0, trace: 0,
+    info: 1, medium: 1, nrm: 1, activitycreateevent: 1, stateevent: 1, '': 1,
+    default: 2, notice: 2, high: 2,
+    warning: 3, warn: 3, wrn: 3, monitorable: 3, lossevent: 3, diag: 3, report: 3,
+    error: 4, err: 4, unexpected: 4, hang: 4, spin: 4, jetsam: 4, 'force quit': 4,
+    fault: 5, critical: 5, fatal: 5, assert: 5, crash: 5, panic: 5,
+  };
+  function sevOf(name) {
+    const k = name.toLowerCase();
+    if (k in SEV_OF) return SEV_OF[k];
+    if (/fault|fatal|critical|assert|panic|crash/.test(k)) return 5;
+    if (/err|unexpected|exception|fail/.test(k)) return 4;
+    if (/warn|loss/.test(k)) return 3;
+    if (/debug|verbose|trace/.test(k)) return 0;
+    return 1;
+  }
+
+  // ---------- small helpers ----------
+  const copyStr = (s) => s.split('').join('');          // detach from the 8 MB chunk string it was sliced from
+  const CP1252 = new Map();                             // reverse of the latin1 decoder for bytes 0x80-0x9F
+  for (let b = 0x80; b < 0xA0; b++) CP1252.set(LATIN1.decode(new Uint8Array([b])), b);
+  function fixUtf8(s) {                                 // latin1-decoded UTF-8 -> proper string
+    if (!/[^\x00-\x7f]/.test(s)) return s;
+    const b = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); b[i] = c < 256 ? c : (CP1252.get(s[i]) || 63); }
+    return UTF8.decode(b);
+  }
+  const toLatin = (s) => (/[^\x00-\x7f]/.test(s) ? LATIN1.decode(new TextEncoder().encode(s)) : s);
+  const escapeRx = (s) => s.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+  const basename = (p) => p.slice(p.lastIndexOf('/') + 1);
+  function concat(list, total) { const out = new Uint8Array(total); let o = 0; for (const a of list) { out.set(a, o); o += a.length; } return out; }
+  function lowerBound(a, x, lo, hi) { while (lo < hi) { const m = (lo + hi) >>> 1; if (a[m] < x) lo = m + 1; else hi = m; } return lo; }
+  function upperBound(a, x, lo, hi) { while (lo < hi) { const m = (lo + hi) >>> 1; if (a[m] <= x) lo = m + 1; else hi = m; } return lo; }
+
+  class Dict {                                          // string <-> small integer id; id 0 is always ''
+    constructor(max) { this.max = max; this.map = new Map([['', 0]]); this.names = ['']; }
+    id(s) {
+      let i = this.map.get(s);
+      if (i === undefined) {
+        if (this.names.length >= this.max && s !== '(other)') return this.id('(other)');
+        i = this.names.length;
+        this.map.set(copyStr(s), i);
+        this.names.push(fixUtf8(copyStr(s)));
+      }
+      return i;
+    }
+  }
+
+  // ---------- timestamps ----------
+  const d2 = (s, i) => (s.charCodeAt(i) - 48) * 10 + s.charCodeAt(i + 1) - 48;
+  function daysFromCivil(y, m, d) {
+    y -= m <= 2;
+    const era = Math.floor(y / 400), yoe = y - era * 400;
+    const doy = Math.floor((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1;
+    return era * 146097 + yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy - 719468;
+  }
+  let cY = 0, cM = 0, cD = 0, cDays = 0;                // consecutive rows nearly always share a date
+  function ymd(y, m, d) {
+    if (y !== cY || m !== cM || d !== cD) {
+      if (!(y > 1990 && y < 2200 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return NaN;
+      cY = y; cM = m; cD = d; cDays = daysFromCivil(y, m, d);
+    }
+    return cDays * 86400000;
+  }
+  function isoAt(s, p) {                                // "YYYY-MM-DD?HH:MM:SS[.ffffff]" at p -> ms as if UTC, NaN if malformed
+    if (s.charCodeAt(p + 4) !== 45) return NaN;
+    const h = d2(s, p + 11), mi = d2(s, p + 14), sec = d2(s, p + 17);
+    if (!(h >= 0 && h < 24 && mi >= 0 && mi < 60 && sec >= 0 && sec < 62)) return NaN;
+    let t = ymd(d2(s, p) * 100 + d2(s, p + 2), d2(s, p + 5), d2(s, p + 8)) + h * 3600000 + mi * 60000 + sec * 1000;
+    if (s.charCodeAt(p + 19) === 46) {
+      let scale = 100, i = p + 20, c;
+      while ((c = s.charCodeAt(i) - 48) >= 0 && c <= 9 && scale >= 0.0001) { t += c * scale; scale /= 10; i++; }
+    }
+    return t;
+  }
+  function offStr(z) {                                  // "-0500", "+05:30", "-05" -> minutes east of UTC
+    const m = /^([-+])(\d\d):?(\d\d)?$/.exec(z);
+    return m ? (m[1] === '-' ? -1 : 1) * (m[2] * 60 + (+m[3] || 0)) : NaN;
+  }
+  function stamp(t, digits = 3) {                       // UTC ms -> "YYYY-MM-DD HH:MM:SS.fff"
+    const d = new Date(Math.floor(t)), z = (n, w = 2) => String(n).padStart(w, '0');
+    let s = `${d.getUTCFullYear()}-${z(d.getUTCMonth() + 1)}-${z(d.getUTCDate())} ${z(d.getUTCHours())}:${z(d.getUTCMinutes())}:${z(d.getUTCSeconds())}`;
+    if (digits) s += '.' + z(Math.floor((t - Math.floor(t / 1000) * 1000) * 10 ** (digits - 3)), digits);
+    return s;
+  }
+
+  // ---------- zip (central directory + raw deflate via DecompressionStream) ----------
+  // Reads zip64, and also repairs what `ditto -c -k` (the collector's zipper) writes instead of zip64: plain
+  // 32-bit sizes and offsets that silently wrap around once a file or the archive passes 4 GB.
+  const GB4 = 4294967296;
+  async function readZip(file) {
+    const size = file.size, tailLen = Math.min(size, 65557 + 20);
+    const tail = new Uint8Array(await file.slice(size - tailLen).arrayBuffer());
+    const dv = new DataView(tail.buffer);
+    let e = -1;
+    for (let i = tail.length - 22; i >= 0; i--) if (dv.getUint32(i, true) === 0x06054b50) { e = i; break; }
+    if (e < 0) throw new Error('This does not look like a zip file (no end-of-central-directory record).');
+    let cdSize = dv.getUint32(e + 12, true), cdOff = size - tailLen + e - cdSize;     // not the stored offset: that one wraps
+    if (e >= 20 && dv.getUint32(e - 20, true) === 0x07064b50) {
+      const zOff = Number(dv.getBigUint64(e - 12, true));
+      const z = new DataView(await file.slice(zOff, zOff + 56).arrayBuffer());
+      if (z.getUint32(0, true) === 0x06064b50) { cdSize = Number(z.getBigUint64(40, true)); cdOff = Number(z.getBigUint64(48, true)); }
+    }
+    const cd = new Uint8Array(await file.slice(cdOff, cdOff + cdSize).arrayBuffer());
+    const c = new DataView(cd.buffer);
+    const out = [];
+    let p = 0;
+    while (p + 46 <= cd.length && c.getUint32(p, true) === 0x02014b50) {
+      const method = c.getUint16(p + 10, true);
+      let csize = c.getUint32(p + 20, true), usize = c.getUint32(p + 24, true), hdr = c.getUint32(p + 42, true);
+      const n = c.getUint16(p + 28, true), m = c.getUint16(p + 30, true), k = c.getUint16(p + 32, true);
+      const name = UTF8.decode(cd.subarray(p + 46, p + 46 + n));
+      for (let x = p + 46 + n; x + 4 <= p + 46 + n + m;) {
+        const id = c.getUint16(x, true), len = c.getUint16(x + 2, true);
+        if (id === 1) {
+          let q = x + 4;
+          if (usize === 0xFFFFFFFF) { usize = Number(c.getBigUint64(q, true)); q += 8; }
+          if (csize === 0xFFFFFFFF) { csize = Number(c.getBigUint64(q, true)); q += 8; }
+          if (hdr === 0xFFFFFFFF) hdr = Number(c.getBigUint64(q, true));
+        }
+        x += 4 + len;
+      }
+      p += 46 + n + m + k;
+      out.push({ path: name, size: usize, csize, method, hdr, next: null, cdOff });
+    }
+    for (let i = 0; i + 1 < out.length; i++) out[i].next = out[i + 1];
+    return out.filter((x) => !x.path.endsWith('/'));
+  }
+  async function locate(file, e) {                      // true position of an entry's local header
+    if (e.at !== undefined) return e.at;
+    for (let pos = e.hdr; pos + 30 <= e.cdOff; pos += GB4) {      // the stored offset may be short by a multiple of 4 GB
+      const b = new Uint8Array(await file.slice(pos, pos + 30 + 1024).arrayBuffer()), h = new DataView(b.buffer);
+      if (b.length < 30 || h.getUint32(0, true) !== 0x04034b50) continue;
+      const n = h.getUint16(26, true);
+      if (UTF8.decode(b.subarray(30, 30 + n)) !== e.path) continue;
+      e.data = pos + 30 + n + h.getUint16(28, true);
+      return (e.at = pos);
+    }
+    throw new Error(`Corrupt zip: cannot find ${e.path}`);
+  }
+  async function zipData(file, e) {                     // -> Blob (stored) or ReadableStream of inflated bytes
+    await locate(file, e);
+    const end = e.next ? await locate(file, e.next) : e.cdOff;
+    const room = end - e.data - e.csize;                // 4 GB or more unaccounted for before the next entry: the size wrapped
+    if (room >= GB4) e.csize += Math.floor(room / GB4) * GB4;
+    const raw = file.slice(e.data, e.data + e.csize);
+    if (e.method === 0) return raw;
+    if (e.method !== 8) throw new Error(`Unsupported zip compression method ${e.method}: ${e.path}`);
+    return raw.stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  }
+
+  // Inflated zip members have to live somewhere searchable. Small ones become in-memory Blobs. Large ones are
+  // written to the origin-private file system, because browsers refuse to hold several GB of Blob data: Chrome
+  // accepts the Blob and then fails every read of it. Each session gets its own folder, marked as in use by a
+  // Web Lock; the page deletes folders whose lock is free (see sweepTemp in app.js).
+  async function openStore() {
+    try {
+      if (!navigator.storage || !navigator.storage.getDirectory || !navigator.locks || !('createSyncAccessHandle' in FileSystemFileHandle.prototype)) return null;
+      const root = await navigator.storage.getDirectory();
+      const name = `xldiag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      navigator.locks.request(name, () => new Promise(() => {}));     // never resolves: held until this worker ends
+      return { dir: await root.getDirectoryHandle(name, { create: true }), seq: 0, blobBytes: 0, diskBytes: 0 };
+    } catch (err) { return null; }
+  }
+  const TOO_BIG = 'This zip holds more log data than the browser could unpack into temporary storage. Unzip it and drop the folder instead; the logs are then read in place.';
+
+  class Entry {                                         // one file of the bundle
+    constructor(path, size, blob, zip) { this.path = path; this.size = size; this.cached = blob || null; this.zip = zip || null; }
+    async blob() {
+      if (this.cached) return this.cached;
+      const r = await zipData(this.zip.file, this.zip.e);
+      return typeof r.getReader === 'function' ? new Response(r).blob() : (this.cached = r);
+    }
+    async *chunks(keep, store) {                        // sequential read; keep = remember the inflated bytes for later slicing
+      if (!this.cached) {
+        const r = await zipData(this.zip.file, this.zip.e);
+        if (typeof r.getReader !== 'function') this.cached = r;
+        else {
+          const reader = r.getReader(), parts = [];
+          const disk = keep && store && (this.zip.e.csize > 16 << 20 || store.blobBytes > 384 << 20);
+          let pend = [], pendSize = 0, done = false, fh = null, ah = null, pos = 0;
+          try {
+            if (disk) { fh = await store.dir.getFileHandle(`f${store.seq++}`, { create: true }); ah = await fh.createSyncAccessHandle(); }
+            for (;;) {
+              const { done: end, value } = await reader.read();
+              if (end) { done = true; break; }
+              if (ah) { if (ah.write(value, { at: pos }) !== value.length) throw new Error(TOO_BIG); pos += value.length; }
+              else if (keep) { pend.push(value); pendSize += value.length; if (pendSize >= 32 << 20) { parts.push(new Blob(pend)); pend = []; pendSize = 0; } }
+              yield value;
+            }
+          } catch (err) {
+            throw (err && (err.name === 'QuotaExceededError' || err.name === 'NotReadableError') ? new Error(TOO_BIG) : err);
+          } finally {
+            if (!done) reader.cancel().catch(() => {});
+            if (ah) { try { ah.flush(); } catch (err) { /* reported by the size check below */ } ah.close(); }
+          }
+          if (fh) { this.cached = await fh.getFile(); store.diskBytes += this.cached.size; if (this.cached.size !== pos) throw new Error(TOO_BIG); }
+          else if (keep) {
+            if (pend.length) parts.push(new Blob(pend));
+            this.cached = new Blob(parts);
+            if (store) store.blobBytes += this.cached.size;
+            try { if (this.cached.size) await this.cached.slice(this.cached.size - 1).arrayBuffer(); } catch (err) { throw new Error(TOO_BIG); }
+          }
+          if (keep) this.size = this.cached.size;
+          return;
+        }
+      }
+      const b = this.cached;
+      for (let o = 0; o < b.size; o += CHUNK) yield new Uint8Array(await b.slice(o, o + CHUNK).arrayBuffer());
+    }
+    async head(n) {
+      if (this.cached) return new Uint8Array(await this.cached.slice(0, n).arrayBuffer());
+      const got = []; let len = 0;
+      for await (const c of this.chunks(false)) { got.push(c); len += c.length; if (len >= n) break; }
+      return concat(got, len).subarray(0, n);
+    }
+  }
+
+  // ---------- per-file row index ----------
+  class Source {
+    constructor(id, entry, parser) {
+      this.id = id; this.entry = entry; this.path = entry.path; this.parser = parser;
+      this.n = 0; this.cap = 0; this.lastOm = NaN;
+      this.alloc(Math.max(1024, Math.min(4 << 20, Math.ceil(entry.size / 200))));
+    }
+    alloc(cap) {
+      const grow = (A, old) => { const a = new A(cap); if (old) a.set(old.subarray(0, this.n)); return a; };
+      this.off = grow(Float64Array, this.off); this.len = grow(Uint32Array, this.len); this.t = grow(Float64Array, this.t);
+      this.lvl = grow(Uint8Array, this.lvl); this.proc = grow(Uint16Array, this.proc); this.pid = grow(Int32Array, this.pid);
+      this.sub = grow(Uint16Array, this.sub); this.cat = grow(Uint16Array, this.cat); this.tags = grow(Uint16Array, this.tags);
+      this.cap = cap;
+    }
+    push(off, len, t, lvl, proc, pid, sub, cat, tags) {
+      if (this.n === this.cap) this.alloc(this.cap * 2);
+      const i = this.n++;
+      this.off[i] = off; this.len[i] = len; this.t[i] = t; this.lvl[i] = lvl; this.proc[i] = proc;
+      this.pid[i] = pid; this.sub[i] = sub; this.cat[i] = cat; this.tags[i] = tags;
+    }
+    extend(end) {                                       // a continuation line belongs to the previous row
+      if (this.n) this.len[this.n - 1] = Math.min(end - this.off[this.n - 1], 0xFFFFFFFF);
+    }
+  }
+
+  // ---------- parsers: line(src, s, p, e, off) indexes one line; fields(text) splits a row for display ----------
+  const tab = (s, i, e) => { if (i > e) return e; const j = s.indexOf('\t', i); return j < 0 || j > e ? e : j; };
+  const fld = (s, a, b) => (a >= b ? '' : s.substring(a, b));
+  const unescTsv = (s) => s.replace(/\\([nrt\\])/g, (_, c) => (c === 'n' ? '\n' : c === 't' ? '\t' : c === 'r' ? '' : '\\'));
+
+  function unifiedTsv(ds) {                             // unified_logs/*.tsv written by label_entries
+    const { lvl, proc, sub, cat } = ds.dict;
+    const masks = new Map([['', 0]]);
+    const maskOf = (str) => {
+      let m = masks.get(str);
+      if (m === undefined) { m = 0; for (const name of str.split(',')) m |= 1 << ds.tagId(name); masks.set(copyStr(str), m); }
+      return m;
+    };
+    return {
+      kind: 'unified', group: 'macOS unified log', short: 'unified',
+      line(src, s, p, e, off) {
+        const c = s.charCodeAt(p);
+        if (c < 48 || c > 57) { if (c !== 0 && !s.startsWith('local_time\t', p)) src.extend(off + e - p); return; }
+        const t1 = tab(s, p, e), t2 = tab(s, t1 + 1, e), t3 = tab(s, t2 + 1, e), t4 = tab(s, t3 + 1, e), t5 = tab(s, t4 + 1, e),
+          t6 = tab(s, t5 + 1, e), t7 = tab(s, t6 + 1, e), t8 = tab(s, t7 + 1, e), t9 = tab(s, t8 + 1, e);
+        let t = isoAt(s, t1 + 1);
+        const oc = s.charCodeAt(t1 - 5);
+        if (oc === 43 || oc === 45) {                   // local_time ends in +HHMM / -HHMM: learn the Mac's UTC offset
+          const om = (oc === 45 ? -1 : 1) * (d2(s, t1 - 4) * 60 + d2(s, t1 - 2));
+          if (om === om) {
+            if (t !== t) t = isoAt(s, p) - om * 60000;
+            if (om !== src.lastOm && t === t) { src.lastOm = om; ds.zone.push([t, om]); }
+          }
+        }
+        src.push(off, e - p, t, lvl.id(fld(s, t2 + 1, t3)), proc.id(fld(s, t3 + 1, t4)), fld(s, t4 + 1, t5) | 0,
+          sub.id(fld(s, t6 + 1, t7)), cat.id(fld(s, t7 + 1, t8)), maskOf(fld(s, t8 + 1, t9)));
+      },
+      fields(text) {
+        const f = text.split('\t');
+        return { msg: unescTsv(f.slice(9).join('\t')), extra: { 'Local time': f[0], Sender: f[5] } };
+      },
+    };
+  }
+
+  function unifiedJson(ds) {                            // raw `log --style ndjson` lines (collector ran without jq)
+    const { lvl, proc, sub, cat } = ds.dict;
+    const bit = (name) => 1 << ds.tagId(name);
+    return {
+      kind: 'unified', group: 'macOS unified log', short: 'unified',
+      line(src, s, p, e, off) {
+        if (s.charCodeAt(p) !== 123) { if (s.charCodeAt(p) !== 0) src.extend(off + e - p); return; }
+        let j;
+        try { j = JSON.parse(s.substring(p, e)); } catch (err) { return; }
+        if (!j || typeof j.timestamp !== 'string') return;
+        const ts = j.timestamp, om = offStr(ts.slice(-5));
+        let t = isoAt(ts, 0);
+        if (om === om) { t -= om * 60000; if (om !== src.lastOm && t === t) { src.lastOm = om; ds.zone.push([t, om]); } }
+        const image = j.processImagePath || '', name = basename(image), m = j.eventMessage || '';
+        let tags = 0;
+        if (name === 'Microsoft Excel') tags |= bit('excel');
+        else {
+          if (image.includes('/Microsoft Excel.app/')) tags |= bit('excel-helper');
+          if (/excel/i.test(m)) tags |= bit('mentions-excel');
+        }
+        if (name === 'Microsoft Error Reporting' || name === 'Microsoft AutoUpdate' || name === 'Microsoft Update Assistant') tags |= bit('microsoft');
+        if (name === 'spindump') tags |= bit('hang-report');
+        if ((name === 'kernel' && /memorystatus|jetsam|compressor|swap/i.test(m)) || ((name === 'ReportCrash' || name === 'osanalyticshelper') && /jetsam/i.test(m))) tags |= bit('memory');
+        if (/previous shutdown cause/i.test(m)) tags |= bit('restart');
+        if (j.eventType === 'lossEvent') tags |= bit('logs-dropped');
+        src.push(off, e - p, t, lvl.id(j.messageType || j.eventType || ''), proc.id(name), j.processID | 0, sub.id(j.subsystem || ''), cat.id(j.category || ''), tags);
+      },
+      fields(text) {
+        try {
+          const j = JSON.parse(text);
+          return { msg: j.eventMessage || '', extra: { 'Local time': j.timestamp, Sender: basename(j.senderImagePath || ''), 'Process path': j.processImagePath } };
+        } catch (err) { return { msg: text, extra: {} }; }
+      },
+    };
+  }
+
+  function officeUls(ds, path) {                        // Office's own diagnostics: Timestamp Process TID Area Category EventID Level Message Correlation
+    const { lvl, proc, sub, cat } = ds.dict;
+    const app = (/Diagnostics\/([^/]+)\//i.exec(path) || [0, 'Office'])[1];
+    const nice = app.charAt(0).toUpperCase() + app.slice(1).toLowerCase();
+    return {
+      kind: 'office', group: `${nice} diagnostics`, short: nice.toLowerCase(),
+      line(src, s, p, e, off) {
+        const c = s.charCodeAt(p);
+        if (c < 48 || c > 57 || s.charCodeAt(p + 2) !== 47) { if (c !== 0 && !s.startsWith('Timestamp\t', p)) src.extend(off + e - p); return; }
+        let t = ymd(d2(s, p + 6) * 100 + d2(s, p + 8), d2(s, p), d2(s, p + 3)) + d2(s, p + 11) * 3600000 + d2(s, p + 14) * 60000 + d2(s, p + 17) * 1000;
+        if (s.charCodeAt(p + 19) === 46) t += d2(s, p + 20) * 10 + s.charCodeAt(p + 22) - 48;
+        const t1 = tab(s, p, e), t2 = tab(s, t1 + 1, e), t3 = tab(s, t2 + 1, e), t4 = tab(s, t3 + 1, e), t5 = tab(s, t4 + 1, e),
+          t6 = tab(s, t5 + 1, e), t7 = tab(s, t6 + 1, e);
+        let name = fld(s, t1 + 1, t2), pid = 0;
+        const k = name.indexOf(' (0x');
+        if (k > 0) { pid = parseInt(name.substring(k + 4), 16) | 0; name = name.substring(0, k); }
+        src.push(off, e - p, t, lvl.id(fld(s, t6 + 1, t7)), proc.id(name), pid, sub.id(fld(s, t3 + 1, t4)), cat.id(fld(s, t4 + 1, t5)), 0);
+      },
+      fields(text) {
+        const f = text.split('\t');
+        return { msg: f.slice(7, Math.max(8, f.length - 1)).join('\t'), extra: { 'Thread (TID)': f[2], 'Event ID': f[5], Correlation: f.length > 8 ? f[f.length - 1] : '' } };
+      },
+    };
+  }
+
+  const cap1 = (s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+  const RX_KINDS = [
+    { kind: 'autoupdate', group: 'Microsoft AutoUpdate', short: 'autoupdate', need: 0.6,
+      rx: /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \[([^\]]*)\] <(\w+)> /,
+      map: (m) => ({ t: isoAt(m[1], 0), proc: m[2], lvl: m[3] }) },
+    { kind: 'onedrive', group: 'OneDrive', short: 'onedrive', need: 0.6,
+      rx: /^(\d\d)-(\d\d)-(\d\d),(\d\d:\d\d:\d\d\.\d{3}),\d*,[^,]*,[^,]*,([^,]*),[^,]*,[^,]*,(\w*),/,
+      map: (m) => ({ t: isoAt(`20${m[3]}-${m[1]}-${m[2]} ${m[4]}`, 0), om: 0, proc: 'OneDrive', sub: m[5].replace(/\(\d+\)$/, ''), lvl: m[6] }) },
+    { kind: 'install', group: 'Install history', short: 'install', need: 0.6, zone: true,
+      rx: /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)([-+]\d\d) \S+ ([^\[:]+)(?:\[(\d+)\])?: /,
+      map: (m) => ({ t: isoAt(m[1], 0), om: offStr(m[2]), proc: m[3], pid: +m[4] || 0 }) },
+    { kind: 'power', group: 'Sleep / wake', short: 'power', need: 0.6, zone: true,
+      rx: /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([-+]\d{4}) (\S+)\s*/,
+      map: (m) => ({ t: isoAt(m[1], 0), om: offStr(m[2]), proc: 'powerd', cat: m[3], lvl: 'Default' }) },
+    { kind: 'text', group: 'Other logs', short: '', need: 0.6,
+      rx: /^\[?(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:[.,]\d+)?)(Z|\s?[-+]\d\d:?\d\d(?!\d))?\]?[ \t:|-]*/,
+      map(m, head) {
+        const lv = /\b(fatal|critical|error|warn(?:ing)?|info|notice|debug|trace|verbose)\b/i.exec(head.substr(m[0].length, 80));
+        return { t: isoAt(m[1].replace(',', '.'), 0), om: m[2] ? (m[2] === 'Z' ? 0 : offStr(m[2].trim())) : undefined, lvl: lv ? cap1(lv[1]) : '' };
+      } },
+  ];
+  function rxKind(ds, spec, path) {                     // logs whose lines start with a timestamp matched by a regex
+    const D = ds.dict;
+    return {
+      kind: spec.kind, group: spec.group, short: spec.short || basename(path),
+      line(src, s, p, e, off) {
+        const head = s.substring(p, Math.min(e, p + 300)), m = spec.rx.exec(head);
+        if (!m) { if (s.charCodeAt(p) !== 0) src.extend(off + e - p); return; }
+        const r = spec.map(m, head);
+        if (r.om === undefined) r.t = -r.t;             // local time without an offset: stored negative, fixed up once the Mac's zone is known
+        else if (r.om === r.om) { r.t -= r.om * 60000; if (spec.zone && r.om !== src.lastOm && r.t === r.t) { src.lastOm = r.om; ds.zone.push([r.t, r.om]); } }
+        src.push(off, e - p, r.t, D.lvl.id(r.lvl || ''), D.proc.id(r.proc || ''), r.pid | 0, D.sub.id(r.sub || ''), D.cat.id(r.cat || ''), 0);
+      },
+      fields(text) { const m = spec.rx.exec(text); return { msg: m ? text.slice(m[0].length) : text, extra: {} }; },
+    };
+  }
+
+  function reportKind(ds) {                             // one synthetic row per crash/hang/diag report in the bundle
+    const D = ds.dict;
+    return {
+      kind: 'report', group: 'Crash and hang reports', short: 'report',
+      line(src, s, p, e, off) {
+        const t1 = tab(s, p, e), t2 = tab(s, t1 + 1, e), t3 = tab(s, t2 + 1, e);
+        src.push(off, e - p, isoAt(s, p), D.lvl.id(fld(s, t1 + 1, t2)), D.proc.id(fld(s, t2 + 1, t3)), 0, 0, D.cat.id('report'), 0);
+      },
+      fields(text) {
+        const f = text.split('\t');
+        return { msg: `${f[1]}: ${basename(f[3] || '')}${f[4] ? ' - ' + f[4] : ''}`, extra: { file: f[3] } };
+      },
+    };
+  }
+
+  function sniff(ds, path, head) {
+    if (head.startsWith('local_time\tutc_time\t')) return unifiedTsv(ds);
+    if (head.startsWith('Timestamp\tProcess\tTID\t') || /^\d\d\/\d\d\/\d{4} \d\d:\d\d:\d\d\.\d{3}\t/.test(head)) return officeUls(ds, path);
+    const lines = head.split(/\r?\n/).filter(Boolean).slice(0, 25);
+    if (!lines.length) return null;
+    if (lines[0][0] === '{' && /"timestamp"\s*:/.test(lines[0]) && /"(eventMessage|processImagePath|eventType)"\s*:/.test(lines[0])) return unifiedJson(ds);
+    for (const spec of RX_KINDS) {
+      const hits = lines.filter((l) => spec.rx.test(l)).length;
+      if (hits >= Math.max(1, Math.ceil(lines.length * spec.need))) return rxKind(ds, spec, path);
+    }
+    return null;
+  }
+
+  // ---------- dataset ----------
+  class Dataset {
+    constructor() {
+      this.dict = { lvl: new Dict(250), proc: new Dict(65000), sub: new Dict(65000), cat: new Dict(65000) };
+      this.tagNames = []; this.zone = []; this.entries = []; this.sources = [];
+      this.run = 0; this.textCache = null; this.view = new Uint32Array(0); this.lastBlob = null;
+    }
+    tagId(name) {
+      let i = this.tagNames.indexOf(name);
+      if (i < 0) { if (this.tagNames.length >= 16) return 15; i = this.tagNames.push(copyStr(name)) - 1; }
+      return i;
+    }
+    zoneAt(t) {                                         // the Mac's UTC offset (minutes) at UTC time t
+      const z = this.zone;
+      if (!z.length) return -new Date(t).getTimezoneOffset();
+      let lo = 0, hi = z.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (z[m][0] <= t) lo = m + 1; else hi = m; }
+      return z[Math.max(0, lo - 1)][1];
+    }
+    localToUtc(t) { return t - this.zoneAt(t - this.zoneAt(t) * 60000) * 60000; }
+
+    async load(inputs, progress) {
+      // inputs: [{path, blob}] - one zip, or the files of an unzipped bundle, or loose log files
+      const zips = inputs.filter((f) => /\.zip$/i.test(f.path));
+      if (zips.length > 1) throw new Error('Open one bundle at a time (several .zip files were given).');
+      let name;
+      if (zips.length === 1) {
+        progress({ phase: 'Reading the zip directory' });
+        const file = zips[0].blob;
+        name = basename(zips[0].path).replace(/\.zip$/i, '');
+        for (const e of await readZip(file)) this.entries.push(new Entry(e.path, e.size, null, { file, e }));
+      } else {
+        for (const f of inputs) this.entries.push(new Entry(f.path.replace(/^\/+/, ''), f.blob.size, f.blob));
+      }
+      this.entries = this.entries.filter((en) => !/(^|\/)(__MACOSX\/|\.DS_Store$|\._[^/]*$)/.test(en.path));
+      if (!this.entries.length) throw new Error('No files found in what was dropped.');
+      const root = this.entries[0].path.split('/')[0] + '/';       // strip the bundle's own top-level folder
+      if (this.entries.length > 1 ? this.entries.every((en) => en.path.startsWith(root)) : this.entries[0].path.startsWith(root)) {
+        for (const en of this.entries) en.path = en.path.slice(root.length);
+        if (!name || /^Excel_Diagnostics/.test(root)) name = root.slice(0, -1);
+      }
+      this.entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      this.name = name || (this.entries.length === 1 ? this.entries[0].path : 'Log files');
+
+      // Which files are logs with timestamps? Decide from each candidate's first bytes.
+      const paths = new Set(this.entries.map((en) => en.path));
+      const notes = [];
+      let skippedBaseline = 0;
+      progress({ phase: 'Looking for log files' });
+      for (const en of this.entries) {
+        if (!en.size || !/\.(tsv|ndjson|log|txt)$|\.log\.[^/]*$/i.test(en.path)) continue;
+        if (en.path.startsWith('repro/baseline/') && paths.has('repro/final/' + en.path.slice(15))) { skippedBaseline++; continue; }
+        const parser = sniff(this, en.path, LATIN1.decode(await en.head(4096)));
+        if (parser) this.sources.push(new Source(this.sources.length, en, parser));
+      }
+      if (skippedBaseline) notes.push(`${skippedBaseline} log file(s) under repro/baseline are not on the timeline because repro/final holds a later copy of the same file.`);
+
+      this.store = zips.length ? await openStore() : null;
+      const total = this.sources.reduce((a, s) => a + s.entry.size, 0);
+      let done = 0;
+      for (const src of this.sources) {
+        await this.indexSource(src, (n) => { done += n; progress({ phase: 'Indexing', label: src.path, done, total }); });
+      }
+      this.zone.sort((a, b) => a[0] - b[0]);
+      this.zone = this.zone.filter((z, i, all) => !i || z[1] !== all[i - 1][1]);     // keep only the moments the offset changed
+      await this.addReports();
+      progress({ phase: 'Merging the timeline' });
+      this.finalize();
+      const odl = this.entries.filter((en) => /\.(odl|odlgz|odlsent|aodl)$/i.test(en.path)).length;
+      const offsets = [...new Set(this.zone.map((z) => z[1]))];
+      if (offsets.length > 1) {
+        const name = (om) => `UTC${om < 0 ? '-' : '+'}${String(Math.abs(om) / 60 | 0).padStart(2, '0')}:${String(Math.abs(om) % 60).padStart(2, '0')}`;
+        notes.push(`The Mac's clock changed UTC offset during this period (${offsets.map(name).join(', ')}), from daylight saving or a time zone change. Local times can appear to jump backwards or forwards at those moments; switch "Times in" to UTC for a steady clock.`);
+      }
+      if (this.store && this.store.diskBytes) {
+        notes.push(`To make them searchable, ${(this.store.diskBytes / 1073741824).toFixed(1)} GB of logs from the zip were unpacked into this browser's private storage for this page. They are deleted when you open another bundle or next open this page. Dropping the unzipped folder instead avoids the copy.`);
+      }
+      if (odl) notes.push(`${odl} OneDrive .odl/.odlgz/.odlsent/.aodl files are in Microsoft's obfuscated binary format; they are listed under Files but cannot be searched here.`);
+      return this.info(notes);
+    }
+
+    async indexSource(src, onBytes) {
+      const parser = src.parser;
+      let carry = null, base = 0, pend = [], pendLen = 0;
+      const flush = (final) => {
+        if (carry) { pend.unshift(carry); pendLen += carry.length; carry = null; }
+        if (!pendLen) return;
+        const buf = pend.length === 1 ? pend[0] : concat(pend, pendLen);
+        pend = []; pendLen = 0;
+        const s = LATIN1.decode(buf), n = s.length;
+        let p = 0;
+        for (;;) {
+          let e = s.indexOf('\n', p);
+          if (e < 0) { if (!final || p >= n) break; e = n; }
+          if (e > p) parser.line(src, s, p, e, base + p);
+          p = e + 1;
+          if (p >= n) { p = Math.min(p, n); break; }
+        }
+        if (p < n) carry = buf.slice(p);
+        base += p;
+      };
+      for await (const chunk of src.entry.chunks(true, this.store)) {
+        pend.push(chunk); pendLen += chunk.length; onBytes(chunk.length);
+        if (pendLen >= 4 << 20) flush(false);
+      }
+      flush(true);
+      for (const k of ['off', 'len', 't', 'lvl', 'proc', 'pid', 'sub', 'cat', 'tags']) src[k] = src[k].slice(0, src.n);
+      src.cap = src.n;
+    }
+
+    async addReports() {                                // crash, hang and diagnostic reports become timeline events
+      const lines = [];
+      const add = (t, kind, proc, path, what) => { if (t === t) lines.push(`${stamp(t)}\t${kind}\t${proc}\t${path}\t${what.replace(/[\t\r\n]+/g, ' ')}`); };
+      for (const en of this.entries) {
+        const ext = (/\.(ips|crash|diag|hang|spin|panic|shutdownstall)$/i.exec(en.path) || [0, ''])[1].toLowerCase();
+        const file = basename(en.path);
+        if (ext) {
+          const head = UTF8.decode(await en.head(8192));
+          let t = NaN, proc = '', what = [], kind = { ips: 'Report', crash: 'Crash', diag: 'Diag', hang: 'Hang', spin: 'Spin', panic: 'Panic', shutdownstall: 'Hang' }[ext];
+          const stampOf = (str) => { const m = /(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) ?([-+]\d{4})/.exec(str || ''); return m ? isoAt(m[1], 0) - offStr(m[2]) * 60000 : NaN; };
+          if (head[0] === '{') {
+            try {
+              const j = JSON.parse(head.slice(0, head.indexOf('\n') > 0 ? head.indexOf('\n') : head.length));
+              t = stampOf(j.timestamp); proc = j.app_name || j.name || '';
+              if (j.bug_type === '309' || j.bug_type === '109') kind = 'Crash';
+              else if (j.bug_type === '298') kind = 'Jetsam';
+              else if (j.bug_type === '288' || j.bug_type === '388') kind = 'Hang';
+              if (j.bug_type) what.push(`bug type ${j.bug_type}`);
+              if (j.app_version) what.push(`version ${j.app_version}`);
+              if (j.os_version) what.push(j.os_version);
+            } catch (err) { /* fall through to the filename */ }
+          } else {
+            t = stampOf((/^Date\/Time:\s+(.+)$/m.exec(head) || [])[1]);
+            proc = ((/^(?:Command|Process):\s+(.+?)(?:\s+\[\d+\])?\s*$/m.exec(head)) || [0, ''])[1];
+            for (const key of ['Event', 'Exception Type', 'Termination Reason', 'Action taken', 'Duration']) {
+              const m = new RegExp(`^${key}:\\s+(.+)$`, 'm').exec(head);
+              if (m) what.push(`${key}: ${m[1].trim()}`);
+            }
+          }
+          if (/^JetsamEvent/i.test(file)) kind = 'Jetsam';
+          if (/^(ExcessiveResource|.*\.(cpu|wakeups|diskwrites)_resource)/i.test(file)) kind = 'Diag';
+          if (t !== t) {                                // no timestamp inside: use the one in the file name (Mac local time)
+            const m = /(\d{4}-\d\d-\d\d)-(\d\d)(\d\d)(\d\d)/.exec(file);
+            if (m) t = this.localToUtc(isoAt(`${m[1]} ${m[2]}:${m[3]}:${m[4]}`, 0));
+          }
+          if (!proc) proc = file.replace(/[-_.]20\d\d-.*$/, '').replace(/\.[a-z]+$/i, '');
+          add(t, kind, proc, en.path, what.join('; '));
+        } else if (/CrashReporter\/[^/]+\.txt$/i.test(en.path)) {
+          const text = UTF8.decode(await en.head(4096));
+          for (const m of text.matchAll(/"ForceQuitDate" => (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([-+]\d{4})/g)) {
+            add(isoAt(m[1], 0) - offStr(m[2]) * 60000, 'Force quit', file.replace(/_[0-9A-F-]{36}\.txt$/i, ''), en.path, 'last time the user force-quit this app');
+          }
+        }
+      }
+      if (!lines.length) return;
+      const blob = new Blob([lines.join('\n') + '\n']);
+      const en = new Entry('(crash and hang reports)', blob.size, blob);
+      en.virtual = true;
+      const src = new Source(this.sources.length, en, reportKind(this));
+      this.sources.push(src);
+      await this.indexSource(src, () => {});
+    }
+
+    finalize() {
+      const S = this.sources;
+      let N = 0;
+      for (const src of S) {
+        const t = src.t, n = src.n;
+        let last = NaN;
+        for (let i = 0; i < n; i++) if (t[i] < 0) t[i] = this.localToUtc(-t[i]);
+        for (let i = 0; i < n; i++) { if (t[i] === t[i]) last = t[i]; else t[i] = last; }
+        for (let i = n - 1; i >= 0; i--) { if (t[i] === t[i]) last = t[i]; else t[i] = last; }
+        if (n && t[0] !== t[0]) t.fill(0);
+        src.perm = null;
+        for (let i = 1; i < n; i++) {
+          if (t[i] < t[i - 1]) {                        // rare: a few out-of-order entries
+            const perm = new Uint32Array(n);
+            for (let k = 0; k < n; k++) perm[k] = k;
+            src.perm = perm.sort((a, b) => t[a] - t[b] || a - b);
+            break;
+          }
+        }
+        src.t0 = n ? t[src.perm ? src.perm[0] : 0] : NaN;
+        src.t1 = n ? t[src.perm ? src.perm[n - 1] : n - 1] : NaN;
+        N += n;
+      }
+      const G = this.g = { n: N, T: new Float64Array(N), F: new Uint16Array(N), R: new Uint32Array(N), L: new Uint8Array(N),
+        P: new Uint16Array(N), PID: new Int32Array(N), S: new Uint16Array(N), C: new Uint16Array(N), G: new Uint16Array(N) };
+      // k-way merge by time. Files are mostly disjoint in time, so copy runs from one file while it stays the earliest.
+      const cur = new Uint32Array(S.length);
+      const key = (f) => { const s = S[f], c = cur[f]; return c < s.n ? s.t[s.perm ? s.perm[c] : c] : Infinity; };
+      let o = 0;
+      while (o < N) {
+        let m = -1, mk = Infinity, m2 = -1, k2 = Infinity;
+        for (let f = 0; f < S.length; f++) {
+          const k = key(f);
+          if (k < mk) { m2 = m; k2 = mk; m = f; mk = k; } else if (k < k2) { m2 = f; k2 = k; }
+        }
+        if (m < 0) break;
+        const s = S[m], perm = s.perm, n = s.n, t = s.t;
+        let c = cur[m];
+        for (; c < n; c++) {
+          const r = perm ? perm[c] : c, tv = t[r];
+          if (tv > k2 || (tv === k2 && m2 < m)) break;
+          G.T[o] = tv; G.F[o] = m; G.R[o] = r; G.L[o] = s.lvl[r]; G.P[o] = s.proc[r]; G.PID[o] = s.pid[r];
+          G.S[o] = s.sub[r]; G.C[o] = s.cat[r]; G.G[o] = s.tags[r];
+          o++;
+        }
+        cur[m] = c;
+      }
+      for (const s of S) { s.t = s.lvl = s.proc = s.pid = s.sub = s.cat = s.tags = s.perm = null; }
+      this.t0 = N ? G.T[0] : 0;
+      this.t1 = N ? G.T[N - 1] : 0;
+      const D = this.dict;
+      this.lvlSev = Uint8Array.from(D.lvl.names, sevOf);
+      const order = ['unified', 'office', 'report', 'autoupdate', 'onedrive', 'install', 'power', 'text'];
+      this.groups = [...new Set(S.slice().sort((a, b) => order.indexOf(a.parser.kind) - order.indexOf(b.parser.kind)).map((s) => s.parser.group))];
+      this.srcGroup = Uint16Array.from(S, (s) => this.groups.indexOf(s.parser.group));
+      this.facets = [
+        { name: 'sev', col: G.L, table: this.lvlSev, n: SEV.length },
+        { name: 'group', col: G.F, table: this.srcGroup, n: this.groups.length },
+        { name: 'tag', col: G.G, bits: true, n: 16 },
+        { name: 'proc', col: G.P, n: D.proc.names.length },
+        { name: 'sub', col: G.S, n: D.sub.names.length },
+        { name: 'cat', col: G.C, n: D.cat.names.length },
+        { name: 'lvl', col: G.L, n: D.lvl.names.length },
+        { name: 'file', col: G.F, n: S.length },
+      ];
+    }
+
+    info(notes) {
+      const D = this.dict, srcOf = new Map(this.sources.map((s) => [s.entry, s]));
+      const main = this.sources.filter((s) => s.n && (s.parser.kind === 'unified' || s.parser.kind === 'office'));
+      const focus = main.length ? [Math.min(...main.map((s) => s.t0)) - 60000, Math.max(...main.map((s) => s.t1)) + 60000] : null;
+      return {
+        name: this.name, total: this.g.n, t0: this.t0, t1: this.t1, zone: this.zone, notes,
+        focus: focus && focus[1] - focus[0] < 0.8 * (this.t1 - this.t0) ? focus : null,
+        files: this.entries.map((en, i) => { const s = srcOf.get(en); return { i, path: en.path, size: en.size, src: s ? s.id : -1, rows: s ? s.n : 0 }; }),
+        sources: this.sources.map((s) => ({ id: s.id, path: s.path, kind: s.parser.kind, group: s.parser.group, short: s.parser.short, rows: s.n, t0: s.t0, t1: s.t1, size: s.entry.size, virtual: !!s.entry.virtual })),
+        names: { sev: SEV, group: this.groups, tag: this.tagNames, proc: D.proc.names, sub: D.sub.names, cat: D.cat.names, lvl: D.lvl.names, file: this.sources.map((s) => s.path) },
+        lvlSev: Array.from(this.lvlSev),
+      };
+    }
+
+    // ----- search -----
+    compile(text, cs) {
+      const out = { text: [], fields: [], hl: [], err: null };
+      const FIELD = { level: 'level', lvl: 'level', sev: 'level', severity: 'level', process: 'process', proc: 'process', pid: 'pid',
+        subsystem: 'subsystem', sub: 'subsystem', area: 'subsystem', category: 'category', cat: 'category', tag: 'tag', source: 'source', src: 'source', file: 'source' };
+      const tok = /(-?)(?:(level|lvl|sev|severity|process|proc|pid|subsystem|sub|area|category|cat|tag|source|src|file):)?(?:"((?:[^"\\]|\\.)*)"|\/((?:[^\/\\]|\\.)+)\/(i?)(?=\s|$)|(\S+))/gi;
+      let m;
+      while ((m = tok.exec(text)) !== null) {
+        const neg = m[1] === '-', field = m[2] && FIELD[m[2].toLowerCase()];
+        const lit = m[3] !== undefined ? m[3].replace(/\\(.)/g, '$1') : m[6];
+        if (field) { out.fields.push({ neg, field, value: (lit !== undefined ? lit : m[4] || '').toLowerCase() }); continue; }
+        if (lit === '' || (lit === undefined && m[4] === undefined)) continue;
+        const src = m[4] !== undefined ? m[4] : escapeRx(lit);
+        const flags = 'm' + (cs && !m[5] ? '' : 'i');
+        try {
+          out.text.push({ neg, re: new RegExp(toLatin(src), 'g' + flags), one: new RegExp(toLatin(src), flags) });
+          if (!neg) out.hl.push({ src, flags: flags.replace('m', '') });
+        } catch (err) { out.err = `Invalid regular expression /${src}/ - ${err.message}`; }
+      }
+      return out;
+    }
+
+    async scanText(src, lo, hi, terms, run, onBytes) {    // -> one byte per row of src: 1 where the text terms match
+      const bm = new Uint8Array(src.n), { off, len } = src, blob = await src.entry.blob();
+      let r = lo;
+      while (r < hi) {
+        if (run !== this.run) throw new Error('superseded');
+        const start = off[r];
+        const rEnd = Math.min(hi, Math.max(r + 1, upperBound(off, start + CHUNK, r, hi)));
+        const end = off[rEnd - 1] + len[rEnd - 1];
+        const s = LATIN1.decode(await blob.slice(start, end).arrayBuffer());
+        const acc = new Uint8Array(rEnd - r).fill(1), hit = new Uint8Array(rEnd - r);
+        for (const term of terms) {
+          hit.fill(0);
+          const re = term.re;
+          re.lastIndex = 0;
+          let row = r, m;
+          while ((m = re.exec(s)) !== null) {           // jump from match to match; each hit marks its row and skips to the next row
+            const pos = start + m.index, j = upperBound(off, pos, row, rEnd) - 1, rowEnd = off[j] + len[j];
+            if (pos < rowEnd) {
+              if (pos + m[0].length <= rowEnd) hit[j - r] = 1;
+              else if (term.one.test(s.substring(off[j] - start, rowEnd - start))) hit[j - r] = 1;
+            }
+            if (j + 1 >= rEnd) break;
+            row = j + 1;
+            re.lastIndex = off[row] - start;
+          }
+          if (term.neg) for (let k = 0; k < acc.length; k++) acc[k] &= hit[k] ^ 1;
+          else for (let k = 0; k < acc.length; k++) acc[k] &= hit[k];
+        }
+        bm.set(acc, r);
+        onBytes(end - start);
+        r = rEnd;
+      }
+      return bm;
+    }
+
+    async query(q, progress) {
+      const run = ++this.run, started = Date.now();
+      const G = this.g, N = G.n, S = this.sources, D = this.dict;
+      const c = this.compile(q.text || '', !!q.cs);
+      const i0 = q.t0 != null ? lowerBound(G.T, q.t0, 0, N) : 0;
+      const i1 = q.t1 != null ? lowerBound(G.T, q.t1, 0, N) : N;
+
+      // facet selections
+      const act = this.facets.map((f) => {
+        const sel = (q.facets && q.facets[f.name]) || {}, a = { f, on: false, inc: null, exc: null, incMask: 0, excMask: 0, counts: new Uint32Array(f.n) };
+        if (f.bits) { for (const v of sel.inc || []) a.incMask |= 1 << v; for (const v of sel.exc || []) a.excMask |= 1 << v; a.on = !!(a.incMask || a.excMask); }
+        else {
+          if (sel.inc && sel.inc.length) { a.inc = new Uint8Array(f.n); for (const v of sel.inc) a.inc[v] = 1; }
+          if (sel.exc && sel.exc.length) { a.exc = new Uint8Array(f.n); for (const v of sel.exc) a.exc[v] = 1; }
+          a.on = !!(a.inc || a.exc);
+        }
+        return a;
+      });
+      // field:value terms
+      const preds = [];
+      for (const t of c.fields) {
+        const v = t.value, keep = t.neg ? 0 : 1;
+        const table = (names, also) => Uint8Array.from(names, (nm, i) => (nm.toLowerCase().includes(v) || (also && also(i)) ? 1 : 0));
+        if (t.field === 'pid') preds.push({ col: G.PID, eq: parseInt(v, v.startsWith('0x') ? 16 : 10), keep });
+        else if (t.field === 'tag') { let mask = 0; this.tagNames.forEach((nm, i) => { if (nm.toLowerCase().includes(v)) mask |= 1 << i; }); preds.push({ col: G.G, mask, keep }); }
+        else if (t.field === 'level') preds.push({ col: G.L, keep,   // prefix match: level:fault must not match "Default"
+          table: Uint8Array.from(D.lvl.names, (nm, i) => (v && (nm.toLowerCase().startsWith(v) || SEV[this.lvlSev[i]].toLowerCase().startsWith(v)) ? 1 : 0)) });
+        else if (t.field === 'process') preds.push({ col: G.P, table: table(D.proc.names), keep });
+        else if (t.field === 'subsystem') preds.push({ col: G.S, table: table(D.sub.names), keep });
+        else if (t.field === 'category') preds.push({ col: G.C, table: table(D.cat.names), keep });
+        else if (t.field === 'source') preds.push({ col: G.F, file: true, table: Uint8Array.from(S, (s) => (`${s.path}\n${s.parser.group}\n${s.parser.short}`.toLowerCase().includes(v) ? 1 : 0)), keep });
+      }
+
+      // text terms: scan only files the other filters leave in play, and only the rows inside the time window
+      let bms = null, skipped = null;
+      if (c.text.length) {
+        const fileOk = S.map((s, f) => {
+          for (const a of act) {
+            if (!a.on || a.f.col !== G.F) continue;
+            const v = a.f.table ? a.f.table[f] : f;
+            if ((a.inc && !a.inc[v]) || (a.exc && a.exc[v])) return false;
+          }
+          return preds.every((p) => !p.file || p.table[f] === p.keep);
+        });
+        const lo = new Float64Array(S.length).fill(Infinity), hi = new Float64Array(S.length).fill(-1);
+        for (let i = i0; i < i1; i++) { const f = G.F[i], r = G.R[i]; if (r < lo[f]) lo[f] = r; if (r > hi[f]) hi[f] = r; }
+        const key = JSON.stringify(c.text.map((t) => [t.neg, t.re.source, t.re.flags]));
+        if (!this.textCache || this.textCache.key !== key) this.textCache = { key, files: new Map() };
+        const cache = this.textCache.files, jobs = [];
+        let total = 0, done = 0;
+        for (let f = 0; f < S.length; f++) {
+          if (!fileOk[f] || hi[f] < 0) continue;
+          const have = cache.get(f);
+          if (have && have.lo <= lo[f] && have.hi > hi[f]) continue;
+          const a = have ? Math.min(have.lo, lo[f]) : lo[f], b = have ? Math.max(have.hi, hi[f] + 1) : hi[f] + 1;
+          jobs.push({ f, a, b });
+          total += S[f].off[b - 1] + S[f].len[b - 1] - S[f].off[a];
+        }
+        for (const job of jobs) {
+          const bm = await this.scanText(S[job.f], job.a, job.b, c.text, run, (n) => { done += n; progress({ phase: 'Searching', label: S[job.f].path, done, total, search: true }); });
+          cache.set(job.f, { bm, lo: job.a, hi: job.b });
+        }
+        if (run !== this.run) throw new Error('superseded');
+        bms = S.map((s, f) => (fileOk[f] && cache.has(f) ? cache.get(f).bm : null));
+        skipped = fileOk.map((ok, f) => !ok && hi[f] >= 0);     // deselected files were not searched: their counts are unknown
+      }
+
+      const nb = Math.max(1, q.bins | 0 || 120), h0 = q.t0 != null ? q.t0 : this.t0, h1 = q.t1 != null ? q.t1 : this.t1 + 1;
+      const hist = new Uint32Array(nb * 3), scale = nb / Math.max(1, h1 - h0), lvlSev = this.lvlSev;
+      const only = q.only ? Uint32Array.from(q.only).filter((i) => i >= i0 && i < i1) : null;
+      const view = new Uint32Array(only ? only.length : i1 - i0);
+      let n = 0;
+      const nAct = act.length, nPred = preds.length;
+      const test = (i) => {
+        if (bms) { const bm = bms[G.F[i]]; if (!bm || !bm[G.R[i]]) return; }
+        for (let k = 0; k < nPred; k++) {
+          const p = preds[k], v = p.col[i];
+          if ((p.table ? p.table[v] : p.mask !== undefined ? (v & p.mask ? 1 : 0) : v === p.eq ? 1 : 0) !== p.keep) return;
+        }
+        let fails = 0, failK = -1;
+        for (let k = 0; k < nAct; k++) {
+          const a = act[k];
+          if (!a.on) continue;
+          const f = a.f, v = f.table ? f.table[f.col[i]] : f.col[i];
+          const ok = f.bits ? (!a.incMask || (v & a.incMask) !== 0) && (v & a.excMask) === 0 : (!a.inc || a.inc[v] === 1) && !(a.exc && a.exc[v] === 1);
+          if (!ok) { if (++fails > 1) return; failK = k; }
+        }
+        // a row failing exactly one facet still counts for that facet, so its other values show what selecting them would add
+        for (let k = fails ? failK : 0, end = fails ? failK + 1 : nAct; k < end; k++) {
+          const a = act[k], f = a.f, v = f.table ? f.table[f.col[i]] : f.col[i];
+          if (f.bits) { for (let b = 0, x = v; x; b++, x >>>= 1) if (x & 1) a.counts[b]++; } else a.counts[v]++;
+        }
+        if (fails) return;
+        view[n++] = i;
+        let b = ((G.T[i] - h0) * scale) | 0;
+        if (b >= nb) b = nb - 1; else if (b < 0) b = 0;
+        const sv = lvlSev[G.L[i]];
+        hist[b * 3 + (sv >= 4 ? 2 : sv === 3 ? 1 : 0)]++;
+      };
+      if (only) for (let k = 0; k < only.length; k++) test(only[k]);
+      else for (let i = i0; i < i1; i++) test(i);
+      this.view = view.subarray(0, n);
+
+      const facets = {};
+      for (const a of act) {
+        const sel = (q.facets && q.facets[a.f.name]) || {}, chosen = new Set([...(sel.inc || []), ...(sel.exc || [])]);
+        const name = a.f.name, always = name === 'sev' || name === 'group' || (name === 'file' && S.length <= 80);
+        let ids = [];
+        for (let v = 0; v < a.counts.length; v++) if (a.counts[v] || chosen.has(v) || (always && (name !== 'file' || S[v].n))) ids.push(v);
+        const all = ids.length;
+        if (name === 'sev') ids.reverse(); else if (!always) ids.sort((x, y) => a.counts[y] - a.counts[x] || x - y);
+        if (ids.length > 60) ids = ids.slice(0, 60).concat(ids.slice(60).filter((v) => chosen.has(v)));
+        const unknown = (v) => skipped && a.f.col === G.F && skipped.some((sk, f) => sk && (a.f.table ? a.f.table[f] : f) === v);
+        facets[name] = { values: ids.map((v) => [v, unknown(v) ? -1 : a.counts[v]]), all };
+      }
+      const res = { count: n, total: N, hist: { t0: h0, t1: h1, nb, bins: Array.from(hist) }, facets, hl: c.hl, err: c.err, ms: Date.now() - started };
+      if (q.anchor != null) { res.anchorIndex = Math.min(Math.max(0, n - 1), lowerBound(this.view, q.anchor, 0, n)); res.anchorExact = n > 0 && this.view[res.anchorIndex] === q.anchor; }
+      return res;
+    }
+
+    // ----- reading rows back -----
+    async readRows(positions, capBytes) {
+      const G = this.g, items = positions.map((i) => ({ i, s: G.F[i], r: G.R[i] })), by = new Map();
+      for (const it of items) { if (!by.has(it.s)) by.set(it.s, []); by.get(it.s).push(it); }
+      await Promise.all([...by].map(async ([s, list]) => {
+        const src = this.sources[s], blob = await src.entry.blob();
+        let a = Infinity, b = 0;
+        for (const it of list) { it.off = src.off[it.r]; it.full = src.len[it.r]; it.len = Math.min(it.full, capBytes); a = Math.min(a, it.off); b = Math.max(b, it.off + it.len); }
+        if (b - a <= 4 << 20) {
+          const buf = new Uint8Array(await blob.slice(a, b).arrayBuffer());
+          for (const it of list) it.text = UTF8.decode(buf.subarray(it.off - a, it.off - a + it.len));
+        } else {
+          await Promise.all(list.map(async (it) => { it.text = UTF8.decode(await blob.slice(it.off, it.off + it.len).arrayBuffer()); }));
+        }
+      }));
+      return items.map((it) => {
+        const i = it.i, text = it.text.replace(/[\r\n\0]+$/, ''), f = this.sources[it.s].parser.fields(text);
+        return { row: [i, G.T[i], G.F[i], G.L[i], G.P[i], G.PID[i], G.S[i], G.C[i], G.G[i], f.msg, it.full > it.len ? 1 : 0], extra: f.extra, raw: text, off: it.off };
+      });
+    }
+    async rows(start, count) {
+      const v = this.view, end = Math.min(v.length, start + count);
+      return (await this.readRows(Array.from(v.subarray(Math.max(0, start), Math.max(0, end))), 2048)).map((x) => x.row);
+    }
+    async row(pos) { return (await this.readRows([pos], 2 << 20))[0]; }
+    seek(t) {                                           // index in the current view of the first row at or after time t
+      const v = this.view, T = this.g.T;
+      let lo = 0, hi = v.length;
+      while (lo < hi) { const m = (lo + hi) >>> 1; if (T[v[m]] < t) lo = m + 1; else hi = m; }
+      return Math.min(lo, Math.max(0, v.length - 1));
+    }
+    findSev(from, dir, min) {                           // next row in the view at or above a severity
+      const v = this.view, L = this.g.L, sv = this.lvlSev;
+      for (let k = from + dir; k >= 0 && k < v.length; k += dir) if (sv[L[v[k]]] >= min) return k;
+      return -1;
+    }
+    async exportTsv(progress) {
+      const run = this.run, v = this.view, names = this.info([]).names, clean = (s) => String(s).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\r?\n/g, '\\n');
+      const parts = ['utc_time\tseverity\tlevel\tsource\tprocess\tpid\tsubsystem\tcategory\ttags\tmessage\n'];
+      for (let start = 0; start < v.length; start += 2000) {
+        if (run !== this.run) throw new Error('superseded');
+        const got = await this.readRows(Array.from(v.subarray(start, Math.min(v.length, start + 2000))), 1 << 20);
+        parts.push(new Blob([got.map(({ row: r }) => [stamp(r[1], 6), SEV[this.lvlSev[r[3]]], names.lvl[r[3]], names.file[r[2]], names.proc[r[4]], r[5] || '',
+          names.sub[r[6]], names.cat[r[7]], names.tag.filter((_, b) => r[8] >> b & 1).join(','), r[9]].map(clean).join('\t') + '\n').join('')]));
+        progress({ phase: 'Exporting', done: start, total: v.length, search: true });
+      }
+      return new Blob(parts, { type: 'text/tab-separated-values' });
+    }
+    async fileChunk(i, offset, len) {                   // raw bytes of any bundle file, for the file browser
+      const en = this.entries[i];
+      let blob = en.cached;
+      if (!blob) {
+        if (!this.lastBlob || this.lastBlob.i !== i) this.lastBlob = { i, blob: await en.blob() };
+        blob = this.lastBlob.blob;
+      }
+      return { bytes: await blob.slice(offset, offset + len).arrayBuffer(), size: blob.size, offset };
+    }
+  }
+
+  // ---------- made-up sample bundle, so the page can be tried without real data ----------
+  function sampleBundle(scale = 1) {
+    let seed = 7;
+    const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296, pick = (a) => a[(rnd() * a.length) | 0];
+    const base = Date.UTC(2026, 2, 10, 13, 0, 0), om = -240, span = 3 * 3600e3, crash = base + 95 * 60e3, relaunch = crash + 70e3;
+    const local = (t, digits) => stamp(t + om * 60000, digits);
+    const files = [], add = (path, text) => files.push({ path: 'Excel_Diagnostics_sample/' + path, blob: new Blob([text]) });
+    const books = ['Q1 Forecast.xlsx', 'Regional Sales Pivot.xlsx', 'Headcount Plan.xlsx'];
+
+    // unified log
+    const U = ['local_time\tutc_time\tlevel\tprocess\tpid\tsender\tsubsystem\tcategory\ttags\tmessage'];
+    const quiet = [
+      ['Default', 'runningboardd', 164, 'RunningBoard', 'com.apple.runningboard', 'process', 'mentions-excel', () => `[app<application.com.microsoft.Excel.${1000 + (rnd() * 9000 | 0)}>] Ignoring jetsam update because this process is not memory-managed`],
+      ['Info', 'UserEventAgent', 101, 'UserEventAgent', 'com.apple.cfprefsd', 'daemon', 'mentions-excel', () => `Captured event for com.microsoft.Excel: appIsActive=${rnd() > 0.5}`],
+      ['Default', 'Microsoft Excel', 0, 'AppKit', 'com.apple.AppKit', 'Window', 'excel', () => `order window front conditionally: ${(rnd() * 4000) | 0} related: 0`],
+      ['Info', 'Microsoft Excel', 0, 'CFNetwork', 'com.apple.CFNetwork', 'Default', 'excel', () => `Task <${(rnd() * 1e9 | 0).toString(16).toUpperCase()}>.<${1 + (rnd() * 40 | 0)}> finished successfully`],
+      ['Debug', 'Microsoft Excel', 0, 'CoreFoundation', 'com.apple.defaults', 'User Defaults', 'excel', () => `found no value for key ${pick(['NSWindowTabbingShoudShowTabBarKey', 'AppleLanguages', 'kMSOAutoRecoverInterval'])} in CFPrefsSource`],
+      ['Default', 'filecoordinationd', 388, 'Foundation', 'com.apple.FileCoordination', 'claims', 'mentions-excel', () => `Claim ${(rnd() * 1e8 | 0).toString(16)} granted in server for Microsoft Excel: ${pick(books)}`],
+      ['Default', 'kernel', 0, 'kernel', '', '', 'memory', () => `memorystatus: set assertion priority(${3 + (rnd() * 7 | 0)}) for Microsoft Excel`],
+      ['Info', 'Microsoft Update Assistant', 2210, 'Microsoft Update Assistant', '', '', 'microsoft', () => `Checking for updates for application ${pick(['XCEL2019', 'MSWD2019', 'PPT32019'])}`],
+    ];
+    const allocError = ['Error', 'Microsoft Excel', 0, 'libsystem_malloc.dylib', 'com.apple.libmalloc', 'default', 'excel', () => `PivotCache: could not grow record buffer to ${2 + (rnd() * 6 | 0)} GB (out of memory), retrying with a smaller block`];
+    const fontError = ['Error', 'Microsoft Excel', 0, 'CoreText', 'com.apple.CoreText', 'default', 'excel', () => `CTFontManagerRegisterFontsForURL failed for font ${pick(['Aptos.ttf', 'Calibri.ttf'])}: already registered`];
+    const n = Math.round(24000 * scale);
+    let pid = 4121;
+    for (let i = 0; i < n; i++) {
+      const storm = rnd() < 0.14;                          // the minutes before the crash are much busier
+      const t = storm ? crash - 240e3 * rnd() * rnd() : base + (i / n) * span + rnd() * 50;
+      if (t > crash && t < relaunch) continue;
+      pid = t >= relaunch ? 4307 : 4121;
+      const q = storm && rnd() < 0.25 ? allocError : rnd() < 0.006 ? fontError : pick(quiet);
+      U.push(`${local(t, 6)}-0400\t${stamp(t, 6)}\t${q[0]}\t${q[1]}\t${q[2] || pid}\t${q[3]}\t${q[4]}\t${q[5]}\t${q[6]}\t${q[7]()}`);
+    }
+    const burst = [
+      [-41e3, 'Default', 'Microsoft Excel', 4121, 'excel', 'PivotTable filter requested on field "Region" (items: 48211)'],
+      [-38e3, 'Default', 'kernel', 0, 'memory', 'memorystatus: Microsoft Excel [4121] exceeded mem limit: ActiveSoft 6144 MB (non-fatal)'],
+      [-31e3, 'Default', 'kernel', 0, 'memory', 'vm_compressor: compressor pool usage 91%, swapping out'],
+      [-22e3, 'Error', 'WindowServer', 388, 'mentions-excel', 'disable_update_timeout: UI updates were forcibly re-enabled for application "Microsoft Excel" after 1.00 seconds'],
+      [-20e3, 'Default', 'spindump', 771, 'hang-report,mentions-excel', 'Microsoft Excel [4121] is unresponsive, sampling for 10 seconds'],
+      [-6e3, 'Fault', 'Microsoft Excel', 4121, 'excel', 'Unhandled exception in PivotCache refresh\\n  0  Microsoft Excel  0x0000000104a3c1f0 PivotFilterApply + 532\\n  1  Microsoft Excel  0x0000000104a3b9d4 PivotTableUpdate + 96'],
+      [0, 'Default', 'launchd', 1, 'mentions-excel', 'exited due to SIGSEGV | sent by exc handler[4121], ran for 5714012ms: application.com.microsoft.Excel.4121'],
+      [1500, 'Default', 'ReportCrash', 5120, 'mentions-excel', 'Saved crash report for Microsoft Excel[4121] version 16.114 to Microsoft Excel-2026-03-10-103500.ips'],
+      [2500, 'Default', 'Microsoft Error Reporting', 5131, 'microsoft', 'Crash log found for Microsoft Excel; preparing report dialog'],
+    ];
+    for (const [dt, lv, pr, p, tags, msg] of burst) U.push(`${local(crash + dt, 6)}-0400\t${stamp(crash + dt, 6)}\t${lv}\t${pr}\t${p}\t${pr}\t\t\t${tags}\t${msg}`);
+    const header = U.shift();
+    U.sort((a, b) => (a.slice(32, 58) < b.slice(32, 58) ? -1 : 1));
+    U.unshift(header);
+    add('unified_logs/2026-03-10.tsv', U.join('\n') + '\n');
+    add('unified_logs/collection_status.txt', `Date | Status\n2026-03-10 | ok (${U.length - 1} entries)\n`);
+
+    // Excel's own log (UTC, CRLF)
+    const X = ['Timestamp\tProcess\tTID\tArea\tCategory\tEventID\tLevel\tMessage\tCorrelation'];
+    const usd = (t) => { const s = stamp(t); return `${s.slice(5, 7)}/${s.slice(8, 10)}/${s.slice(0, 4)} ${s.slice(11)}`; };
+    const cats = ['Telemetry Event', 'Next user licensing', 'XLS PivotTable', 'MSO AutoRecover', 'Identity', 'Graphics'];
+    const xn = Math.round(9000 * scale);
+    for (let i = 0; i < xn; i++) {
+      const t = base + (i / xn) * span;
+      if (t > crash && t < relaunch) continue;
+      const c = pick(cats), r = rnd();
+      const lv = r < 0.004 ? 'Unexpected' : r < 0.03 ? 'Monitorable' : 'Medium';
+      const msg = c === 'XLS PivotTable' ? `PivotCache::Refresh ${JSON.stringify({ Workbook: pick(books), Records: (rnd() * 50000) | 0, DurationMs: (rnd() * 900) | 0 })}`
+        : c === 'MSO AutoRecover' ? `AutoRecover save completed ${JSON.stringify({ File: pick(books), Bytes: (rnd() * 4e7) | 0 })}`
+          : `${c.replace(/ /g, '')}::Log ${JSON.stringify({ Activity: pick(['Idle', 'Recalc', 'Paint', 'Sync']), Result: lv === 'Unexpected' ? 'Failed' : 'Ok', Value: (rnd() * 1000) | 0 })}`;
+      X.push(`${usd(t)}\tEXCEL (0x${(t < crash ? 4121 : 4307).toString(16).toUpperCase()})\t0x${(1 + (rnd() * 40 | 0)).toString(16)}\tMicrosoft Excel\t${c}\t${(rnd() * 1e6 | 0).toString(36)}\t${lv}\t${msg}\t`);
+    }
+    X.push(`${usd(crash - 6100)}\tEXCEL (0x1019)\t0x1\tMicrosoft Excel\tXLS PivotTable\tb7q2x\tUnexpected\tPivotFilter::Apply failed {"Field":"Region","Items":48211,"HRESULT":"0x8007000E","Reason":"E_OUTOFMEMORY"}\t`);
+    add('office/excel_container_logs/Diagnostics/EXCEL/Primary1773147600000000000_SAMPLE.log', X.join('\r\n') + '\r\n');
+
+    const A = [];
+    for (let i = 0; i < 40; i++) {
+      const t = base + 120e3 + i * 255e3;
+      A.push(`${local(t, 0)} [Microsoft Update Assistant] <${i % 13 === 5 ? 'Warning' : 'Info'}> ${i % 13 === 5 ? 'CriticalSecurityUpdates.Manifest: {"Error":"Unable to retrieve security manifest. Error: -1100","Operation":"Download"}' : 'NOT.COLLECTED: {"Payload":"Checking for updates"}'}`);
+    }
+    add('office/autoupdate.log', A.join('\n') + '\n');
+    add('system/sleep_wake.txt', `${local(base + 20e3, 0)} -0400 Wake                \tWake from Deep Idle [CDNVA] : due to EC.LidOpen/Lid Open\t\n${local(base + span - 600e3, 0)} -0400 Sleep               \tEntering Sleep state due to 'Clamshell Sleep'\t\n`);
+    add('reports/user_Library_Logs_DiagnosticReports/Microsoft Excel-2026-03-10-103500.ips',
+      `{"app_name":"Microsoft Excel","timestamp":"${local(crash, 0)}.00 -0400","app_version":"16.114","bug_type":"309","os_version":"macOS 15.7.8 (24G824)","name":"Microsoft Excel"}\n{\n  "exception" : {"type":"EXC_BAD_ACCESS","signal":"SIGSEGV","subtype":"KERN_INVALID_ADDRESS at 0x0000000000000018"},\n  "faultingThread" : 0,\n  "threads" : [{"triggered":true,"frames":[{"symbol":"PivotFilterApply","imageIndex":0},{"symbol":"PivotTableUpdate","imageIndex":0}]}]\n}\n`);
+    add('reports/crash_summary.txt', `# Crash and hang report summary\n\n## reports/user_Library_Logs_DiagnosticReports/Microsoft Excel-2026-03-10-103500.ips\n"procName":"Microsoft Excel"\n"exception":"EXC_BAD_ACCESS"\n`);
+
+    const M = ['local_time,utc_time,excel_pid,excel_cpu_pct,excel_footprint_mb,excel_compressed_mb,excel_threads,pressure_level,free_mb,compressor_mb,swap_used_mb'];
+    for (let t = base; t < base + span; t += 30e3) {
+      const up = t < crash, k = up ? (t - base) / (crash - base) : (t - relaunch) / span;
+      if (t > crash && t < relaunch) { M.push(`${local(t, 0)},${stamp(t, 0)},,,,,,2,${900 + (rnd() * 200 | 0)},3100,1800`); continue; }
+      const foot = Math.round(up ? 700 + 5600 * k * k : 650 + 900 * k), cmp = Math.round(foot * (up ? 0.25 + 0.3 * k : 0.2));
+      M.push(`${local(t, 0)},${stamp(t, 0)},${up ? 4121 : 4307},${(rnd() * (up && k > 0.9 ? 99 : 30)).toFixed(1)},${foot},${cmp},${40 + (rnd() * 12 | 0)},${up && k > 0.85 ? 4 : up && k > 0.6 ? 2 : 1},${Math.round(up ? 5200 - 4700 * k : 4200)},${Math.round(up ? 600 + 4200 * k : 1500)},${Math.round(up ? 3900 * k * k : 1200)}`);
+    }
+    add('excel_memory_timeline.csv', M.join('\n') + '\n');
+    add('manifest.tsv', 'component\tstatus\tdetails\nsystem\tcomplete\tsystem, memory, sleep/wake, network state\noffice\tcomplete\tversions, Excel logs, AutoRecover, add-ins, preferences\nreports\tcomplete\tcrash, hang, spin and jetsam reports\nunified_logs\tcomplete\t1 day(s), 2026-03-10 through 2026-03-10\n');
+    add('collection.log', '[12:01:02] Excel diagnostics: collect (2026-03-10 through 2026-03-10) for user sample\n[12:01:02] System information\n[12:01:09] Unified logs (Excel, hangs/terminations, memory pressure), 2026-03-10 through 2026-03-10\n[12:03:40] Done.\n');
+    add('summary.md', `# Excel diagnostics summary\n\nThis is made-up sample data that ships with the viewer. It tells one story: Excel's memory climbs for an hour and a half, a PivotTable filter pushes it over the limit, and Excel crashes at ${local(crash, 0)} local time and is relaunched.\n\n- Collected: 2026-03-10 12:03:40 EDT\n- Console user: sample\n- Mode: collect\n- Incident window: 2026-03-10 through 2026-03-10 (1 day(s))\n\n## Collection status\n\n| Component | Status | Details |\n| --- | --- | --- |\n| system | complete | system, memory, sleep/wake, network state |\n| office | complete | versions, Excel logs, AutoRecover, add-ins, preferences |\n| reports | complete | crash, hang, spin and jetsam reports |\n| unified_logs | complete | 1 day(s) |\n\n## Things to try\n\n1. Search for \`pivot\`, then press \`e\` to step through the errors.\n2. Drag across the spike in the histogram to zoom in on the crash.\n3. Open the Memory tab and click just before the drop.\n`);
+    return files;
+  }
+
+  return { Dataset, sampleBundle, SEV, stamp, isoAt, offStr };
+})();
+
+// ---------- worker entry point ----------
+if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope) {
+  let ds = null, lastPost = 0;
+  const progress = (p) => { const now = Date.now(); if (p.done === undefined || now - lastPost > 80) { lastPost = now; postMessage({ progress: p }); } };
+  const api = {
+    load: ({ inputs, sample }) => { ds = new Core.Dataset(); return ds.load(sample ? Core.sampleBundle(1) : inputs, progress); },
+    query: (q) => ds.query(q, progress),
+    rows: ({ start, count }) => ds.rows(start, count),
+    row: ({ pos }) => ds.row(pos),
+    seek: ({ t }) => ds.seek(t),
+    findSev: ({ from, dir, min }) => ds.findSev(from, dir, min),
+    exportTsv: () => ds.exportTsv(progress),
+    fileChunk: ({ i, offset, len }) => ds.fileChunk(i, offset, len),
+  };
+  self.onmessage = async (ev) => {
+    const { id, op, args } = ev.data;
+    try { postMessage({ id, result: await api[op](args || {}) }); }
+    catch (err) { postMessage({ id, error: (err && err.message) || String(err) }); }
+  };
+}
+
+</script>
+<script>
+'use strict';
+/* Excel diagnostics log viewer - user interface. All heavy work happens in the worker (core.js). */
+(() => {
+  const $ = (s, el = document) => el.querySelector(s);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const fmtN = (n) => Number(n).toLocaleString('en-US');
+  const fmtBytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`);
+  const z2 = (n, w = 2) => String(n).padStart(w, '0');
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const SEV = ['Debug', 'Info', 'Notice', 'Warning', 'Error', 'Fault'];
+
+  // ---------- worker plumbing ----------
+  let worker = null, seq = 0;
+  const pending = new Map();
+  async function sweepTemp() {                           // delete unpacked-zip folders left by sessions that have ended
+    try {
+      const root = await navigator.storage.getDirectory();
+      for await (const name of root.keys()) {
+        if (!name.startsWith('xldiag-')) continue;
+        await navigator.locks.request(name, { ifAvailable: true }, async (lock) => { if (lock) await root.removeEntry(name, { recursive: true }); });
+      }
+    } catch (e) { /* no private file system here (file:// pages, older browsers): nothing to clean */ }
+  }
+  sweepTemp();
+  function boot() {
+    if (worker) { worker.terminate(); setTimeout(sweepTemp, 600); }
+    for (const p of pending.values()) p.rej(new Error('superseded'));
+    pending.clear();
+    worker = new Worker(URL.createObjectURL(new Blob([$('#core-src').textContent], { type: 'text/javascript' })));
+    worker.onmessage = (ev) => {
+      const d = ev.data;
+      if (d.progress) return onProgress(d.progress);
+      const p = pending.get(d.id);
+      if (!p) return;
+      pending.delete(d.id);
+      if (d.error) p.rej(new Error(d.error)); else p.res(d.result);
+    };
+    worker.onerror = (e) => fail(e.message || 'The background worker stopped unexpectedly.');
+  }
+  const call = (op, args) => new Promise((res, rej) => { const id = ++seq; pending.set(id, { res, rej }); worker.postMessage({ id, op, args }); });
+
+  // ---------- state ----------
+  let info = null, tzMode = 'bundle';
+  const S = { text: '', cs: false, facets: {}, t0: null, t1: null, pinnedOnly: false };
+  let view = { count: 0, total: 0, hl: [], hist: null }, lastFacets = null;
+  let pages = new Map(), topRow = 0, selPos = null, selIndex = -1, qGen = 0, qTimer = 0;
+  const pins = new Map();
+
+  // ---------- time ----------
+  function offsetAt(t) {                                // minutes east of UTC for display
+    if (tzMode === 'utc') return 0;
+    if (tzMode === 'browser' || !info || !info.zone.length) return -new Date(t).getTimezoneOffset();
+    const z = info.zone;
+    let lo = 0, hi = z.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (z[m][0] <= t) lo = m + 1; else hi = m; }
+    return z[Math.max(0, lo - 1)][1];
+  }
+  function fmtTime(t, ms = true) {
+    if (t !== t) return '';
+    const d = new Date(Math.floor(t) + offsetAt(t) * 60000);
+    return `${d.getUTCFullYear()}-${z2(d.getUTCMonth() + 1)}-${z2(d.getUTCDate())} ${z2(d.getUTCHours())}:${z2(d.getUTCMinutes())}:${z2(d.getUTCSeconds())}${ms ? '.' + z2(d.getUTCMilliseconds(), 3) : ''}`;
+  }
+  function tzLabel(t) {
+    const om = offsetAt(t), a = Math.abs(om);
+    return om === 0 && tzMode === 'utc' ? 'UTC' : `UTC${om < 0 ? '-' : '+'}${z2((a / 60) | 0)}:${z2(a % 60)}`;
+  }
+  function parseTime(str) {                             // "YYYY-MM-DD HH:MM[:SS]" in the display zone -> UTC ms
+    const m = /^\s*(\d{4})-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,3}))?)?)?\s*$/.exec(str);
+    if (!m) return NaN;
+    const naive = Date.UTC(+m[1], m[2] - 1, +m[3], +m[4] || 0, +m[5] || 0, +m[6] || 0, +(m[7] || '0').padEnd(3, '0'));
+    return naive - offsetAt(naive - offsetAt(naive) * 60000) * 60000;
+  }
+  const fmtSpan = (ms) => (ms < 1000 ? `${Math.round(ms)} ms` : ms < 120e3 ? `${(ms / 1000).toFixed(ms < 10e3 ? 1 : 0)} s` : ms < 7200e3 ? `${Math.round(ms / 60e3)} min` : ms < 172800e3 ? `${(ms / 3600e3).toFixed(1)} h` : `${(ms / 86400e3).toFixed(1)} days`);
+
+  // ---------- loading ----------
+  function onProgress(p) {
+    if (p.search) {
+      const bar = $('#searchbar');
+      bar.hidden = false;
+      bar.firstElementChild.style.width = `${p.total ? Math.min(100, (p.done / p.total) * 100) : 0}%`;
+      $('#count').textContent = `${p.phase}… ${p.total ? Math.round((p.done / p.total) * 100) : 0}%`;
+      return;
+    }
+    $('#progText').textContent = p.phase + (p.label ? `: ${p.label}` : '');
+    $('#progBar').style.width = `${p.total ? Math.min(100, (p.done / p.total) * 100) : 0}%`;
+    // a zip written without zip64 understates members over 4 GB, so the total can be passed
+    $('#progNum').textContent = !p.total ? '' : p.done > p.total ? fmtBytes(p.done) : `${fmtBytes(p.done)} of ${fmtBytes(p.total)}`;
+  }
+  function fail(msg) {
+    $('#progress').hidden = true;
+    $('#landing').hidden = false;
+    $('#app').hidden = true;
+    const el = $('#loadError');
+    el.textContent = msg;
+    el.hidden = false;
+  }
+  async function start(inputs, sample) {
+    if (!sample && !inputs.length) return;
+    boot();
+    $('#loadError').hidden = true;
+    $('#landing').hidden = true;
+    $('#app').hidden = true;
+    $('#progress').hidden = false;
+    onProgress({ phase: 'Opening' });
+    try { info = await call('load', sample ? { sample: true } : { inputs }); } catch (e) {
+      if (e.message === 'superseded') return;
+      worker.terminate(); worker = null;                  // also releases anything it had unpacked
+      setTimeout(sweepTemp, 600);
+      fail(e.message);
+      return;
+    }
+    $('#progress').hidden = true;
+    $('#app').hidden = false;
+    init();
+  }
+  function init() {
+    Object.assign(S, { text: '', cs: false, facets: {}, t0: info.focus ? info.focus[0] : null, t1: info.focus ? info.focus[1] : null, pinnedOnly: false });
+    pins.clear(); selPos = null; selIndex = -1; topRow = 0;
+    $('#q').value = ''; $('#caseSens').checked = false;
+    $('#bundleName').textContent = info.name;
+    document.title = `${info.name} - Excel diagnostics viewer`;
+    $('#detail').hidden = true;
+    const banner = $('#banner');
+    banner.hidden = !info.focus;
+    if (info.focus) $('#bannerText').textContent = `Showing the period covered by the macOS and Excel logs. Everything in the bundle runs from ${fmtTime(info.t0, false).slice(0, 10)} to ${fmtTime(info.t1, false).slice(0, 10)}.`;
+    const mem = info.files.find((f) => /(^|\/)excel_memory_timeline\.csv$/.test(f.path));
+    $('[data-tab="memory"]').hidden = !mem;
+    buildTree(''); renderOverview(); updatePins();
+    showTab(info.total ? 'timeline' : 'files');
+    $('#noRows').hidden = !!info.total;
+    if (mem) loadMemory(mem);
+    runQuery();
+  }
+
+  // ---------- tabs ----------
+  function showTab(name) {
+    for (const b of document.querySelectorAll('.tabs button')) b.classList.toggle('on', b.dataset.tab === name);
+    for (const s of document.querySelectorAll('#app > section')) s.hidden = s.id !== `tab-${name}`;
+    if (name === 'timeline') { layout(); setTop(topRow); if (view.hist) drawHist(); }
+    if (name === 'memory') drawMemory();
+  }
+  const currentTab = () => ($('.tabs button.on') || {}).dataset?.tab;
+
+  // ---------- query ----------
+  const schedule = (ms = 0) => { clearTimeout(qTimer); qTimer = setTimeout(runQuery, ms); };
+  async function runQuery() {
+    if (!info) return;
+    const gen = ++qGen;
+    const bins = clamp(Math.floor(($('#hist').clientWidth || 900) / 8), 30, 240);
+    $('#tab-timeline').classList.add('busy');
+    let r;
+    try {
+      r = await call('query', { text: S.text, cs: S.cs, facets: S.facets, t0: S.t0, t1: S.t1, bins, anchor: selPos,
+        only: S.pinnedOnly ? [...pins.keys()].sort((a, b) => a - b) : null });
+    } catch (e) {
+      if (e.message !== 'superseded' && gen === qGen) {
+        $('#count').textContent = e.message; $('#count').classList.add('err');
+        $('#tab-timeline').classList.remove('busy'); $('#searchbar').hidden = true;
+      }
+      return;
+    }
+    if (gen !== qGen) return;
+    $('#tab-timeline').classList.remove('busy');
+    $('#searchbar').hidden = true;
+    view = { count: r.count, total: r.total, hist: r.hist, hl: r.hl.map((h) => { try { return new RegExp(h.src, 'g' + h.flags); } catch (e) { return null; } }).filter(Boolean) };
+    pages = new Map();
+    lastFacets = r.facets;
+    const c = $('#count');
+    c.classList.toggle('err', !!r.err);
+    c.textContent = r.err || `${fmtN(r.count)} of ${fmtN(r.total)} entries`;
+    c.title = `Search took ${r.ms} ms`;
+    $('#clear').disabled = !filtersActive();
+    drawHist(); renderFacets(); renderRange(); layout();
+    if (selPos != null && r.anchorIndex != null && r.count) {
+      selIndex = r.anchorExact ? r.anchorIndex : -1;
+      setTop(r.anchorIndex - Math.floor(visibleRows() / 2));
+    } else { selIndex = -1; setTop(0); }
+  }
+  const filtersActive = () => !!(S.text.trim() || S.pinnedOnly || Object.values(S.facets).some((f) => f.inc.length || f.exc.length));
+  function clearFilters() {
+    S.text = ''; S.facets = {}; S.pinnedOnly = false;
+    $('#q').value = '';
+    updatePins();
+    schedule();
+  }
+  function toggleFacet(name, v, mode) {
+    const f = S.facets[name] || (S.facets[name] = { inc: [], exc: [] }), other = mode === 'inc' ? 'exc' : 'inc';
+    f[other] = f[other].filter((x) => x !== v);
+    const i = f[mode].indexOf(v);
+    if (i >= 0) f[mode].splice(i, 1); else f[mode].push(v);
+    schedule();
+  }
+
+  // ---------- facets ----------
+  const FACETS = [['sev', 'Severity', 'level'], ['group', 'Source', 'source'], ['tag', 'Tag', 'tag'], ['proc', 'Process', 'process'],
+    ['sub', 'Subsystem / area', 'subsystem'], ['cat', 'Category', 'category'], ['lvl', 'Original level', 'level'], ['file', 'File', 'file']];
+  const openFacets = new Set(['sev', 'group', 'tag', 'proc']);
+  function renderFacets() {
+    let html = '';
+    for (const [name, title, field] of FACETS) {
+      const f = lastFacets[name];
+      if (!f || !f.values.length) continue;
+      const sel = S.facets[name] || { inc: [], exc: [] }, nSel = sel.inc.length + sel.exc.length;
+      html += `<details data-f="${name}"${openFacets.has(name) ? ' open' : ''}><summary>${title}${nSel ? `<b>${nSel}</b>` : ''}</summary>`;
+      for (const [v, n] of f.values) {
+        const full = info.names[name][v] || '(none)', label = name === 'file' ? full.slice(full.lastIndexOf('/') + 1) : full;
+        const cls = (sel.inc.includes(v) ? ' inc' : sel.exc.includes(v) ? ' exc' : '') + (name === 'sev' ? ` s${v}` : '');
+        html += `<div class="fv${cls}" data-v="${v}" title="${esc(full)}&#10;Click to show only this. Click &minus; to hide it."><span class="lbl">${name === 'sev' ? '<i></i>' : ''}${esc(label)}</span>` +
+          `<span class="n">${n < 0 ? '–' : fmtN(n)}</span><button class="x" aria-label="Hide ${esc(label)}">−</button></div>`;
+      }
+      if (f.all > f.values.length) html += `<div class="more">${fmtN(f.all - f.values.length)} more. Type <code>${field}:text</code> in the search box to match any of them.</div>`;
+      html += '</details>';
+    }
+    $('#facets').innerHTML = html;
+  }
+
+  // ---------- histogram ----------
+  function drawHist() {
+    const h = view.hist, el = $('#hist'), W = el.clientWidth, H = 92, top = 14, bottom = 18, plotH = H - top - bottom;
+    if (!h || !W) return;
+    const nb = h.nb, bw = W / nb;
+    let max = 0;
+    for (let b = 0; b < nb; b++) max = Math.max(max, h.bins[b * 3] + h.bins[b * 3 + 1] + h.bins[b * 3 + 2]);
+    const base = top + plotH;
+    let s = `<svg width="${W}" height="${H}" role="img" aria-label="Number of entries over time, by severity">`;
+    s += `<line class="grid" x1="0" x2="${W}" y1="${top + 0.5}" y2="${top + 0.5}"/><text class="tick" x="2" y="${top - 4}">${max ? fmtN(max) + ' per bar' : 'No entries in this window'}</text>`;
+    const w = Math.max(1, bw - 2);
+    for (let b = 0; b < nb && max; b++) {
+      const parts = [[h.bins[b * 3], 'o'], [h.bins[b * 3 + 1], 'w'], [h.bins[b * 3 + 2], 'e']].filter((p) => p[0]);
+      if (!parts.length) continue;
+      const hs = parts.map((p) => Math.max(3, (p[0] / max) * plotH));
+      let over = hs.reduce((a, v) => a + v, 0) - plotH;      // the 3px minimum can overshoot; take it back from the tallest segment
+      if (over > 0) hs[hs.indexOf(Math.max(...hs))] -= over;
+      const x = b * bw + 1;
+      let y = base;
+      parts.forEach((p, i) => {
+        const hh = hs[i], last = i === parts.length - 1, gap = i ? 2 : 0;
+        y -= hh;
+        const ht = Math.max(1, hh - gap);
+        if (last) { const r = Math.min(3, w / 2, ht); s += `<path class="b${p[1]}" d="M${x},${y + ht}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + ht}Z"/>`; }
+        else s += `<rect class="b${p[1]}" x="${x}" y="${y}" width="${w}" height="${ht}"/>`;
+      });
+    }
+    s += `<line class="axis" x1="0" x2="${W}" y1="${base + 0.5}" y2="${base + 0.5}"/>`;
+    const span = h.t1 - h.t0, nt = clamp(Math.floor(W / 170), 2, 8);
+    for (let i = 0; i <= nt; i++) {
+      const t = h.t0 + (span * i) / nt, full = fmtTime(t, false);
+      const label = span > 36 * 3600e3 ? full.slice(5, 16) : span > 20 * 60e3 ? (i === 0 ? full.slice(5, 16) : full.slice(11, 16)) : full.slice(11, 19);
+      s += `<text class="tick" x="${clamp((W * i) / nt, 2, W - 2)}" y="${H - 4}" text-anchor="${i === 0 ? 'start' : i === nt ? 'end' : 'middle'}">${label}</text>`;
+    }
+    s += `<rect id="histHover" class="hov" y="${top}" height="${plotH}" width="${bw}" visibility="hidden"/><rect id="histBrush" class="brush" y="${top}" height="${plotH}" width="0" visibility="hidden"/></svg>`;
+    el.innerHTML = s;
+  }
+  (function histEvents() {
+    const el = $('#hist'), tip = $('#histTip');
+    let down = null;
+    const at = (e) => { const r = el.getBoundingClientRect(); return clamp(e.clientX - r.left, 0, r.width); };
+    el.addEventListener('pointerdown', (e) => { if (!view.hist) return; down = at(e); el.setPointerCapture(e.pointerId); });
+    el.addEventListener('pointermove', (e) => {
+      const h = view.hist;
+      if (!h) return;
+      const x = at(e), W = el.clientWidth, bw = W / h.nb, b = clamp(Math.floor(x / bw), 0, h.nb - 1);
+      const brush = $('#histBrush'), hov = $('#histHover');
+      if (down != null && Math.abs(x - down) > 3) {
+        brush.setAttribute('x', Math.min(x, down)); brush.setAttribute('width', Math.abs(x - down)); brush.setAttribute('visibility', 'visible');
+        hov.setAttribute('visibility', 'hidden');
+        tip.hidden = true;
+        return;
+      }
+      hov.setAttribute('x', b * bw); hov.setAttribute('visibility', 'visible');
+      const t = h.t0 + ((h.t1 - h.t0) * b) / h.nb, t2 = h.t0 + ((h.t1 - h.t0) * (b + 1)) / h.nb;
+      const o = h.bins[b * 3], wn = h.bins[b * 3 + 1], er = h.bins[b * 3 + 2];
+      tip.replaceChildren();
+      const head = document.createElement('div');
+      head.className = 'tt';
+      head.textContent = `${fmtTime(t, false)} to ${fmtTime(t2, false).slice(11)}`;
+      tip.append(head);
+      for (const [n, cls, name] of [[er, 'be', 'errors and faults'], [wn, 'bw', 'warnings'], [o, 'bo', 'other entries']]) {
+        const row = document.createElement('div');
+        row.innerHTML = `<i class="${cls}"></i><b>${fmtN(n)}</b> ${name}`;
+        tip.append(row);
+      }
+      tip.hidden = false;
+      const r = el.getBoundingClientRect();
+      tip.style.left = `${clamp(x + 14, 0, r.width - tip.offsetWidth - 4)}px`;
+    });
+    const end = (e) => {
+      const h = view.hist;
+      tip.hidden = true;
+      if ($('#histHover')) $('#histHover').setAttribute('visibility', 'hidden');
+      if (down == null || !h || e.type === 'pointerleave') { if (e.type !== 'pointerleave') down = null; return; }
+      const x = at(e), W = el.clientWidth, a = Math.min(x, down), b = Math.max(x, down);
+      down = null;
+      if (b - a > 3) {                                   // drag: zoom to the selection
+        S.t0 = h.t0 + ((h.t1 - h.t0) * a) / W; S.t1 = h.t0 + ((h.t1 - h.t0) * b) / W;
+        schedule();
+      } else if (view.count) {                           // click: scroll the table to that time
+        call('seek', { t: h.t0 + ((h.t1 - h.t0) * x) / W }).then((k) => setTop(k - 2));
+      }
+    };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointerleave', end);
+  })();
+  function renderRange() {
+    const t0 = S.t0 != null ? S.t0 : info.t0, t1 = S.t1 != null ? S.t1 : info.t1;
+    $('#tFrom').value = fmtTime(t0, false);
+    $('#tTo').value = fmtTime(t1, false);
+    $('#tzNote').textContent = `${tzLabel(t0)} · ${fmtSpan(t1 - t0)}`;
+    $('#allTime').disabled = S.t0 == null && S.t1 == null;
+    $('#zoomOut').disabled = S.t0 == null && S.t1 == null;
+  }
+  function setRange(t0, t1) {
+    if (t0 != null && t1 != null && t1 <= t0) return;
+    S.t0 = t0 != null && t0 <= info.t0 ? null : t0;
+    S.t1 = t1 != null && t1 > info.t1 ? null : t1;
+    schedule();
+  }
+
+  // ---------- virtual table ----------
+  const ROW = 22, PAGE = 200, MAXPX = 6e6;
+  const vs = $('#vs'), rowsEl = $('#rows'), spacer = $('#spacer');
+  let expected = -1, rafPending = false;
+  const visibleRows = () => Math.max(1, Math.floor(vs.clientHeight / ROW));
+  const maxTop = () => Math.max(0, view.count - visibleRows());
+  function layout() {
+    rowsEl.style.height = `${vs.clientHeight}px`;
+    spacer.style.height = `${Math.max(0, Math.min(view.count * ROW, MAXPX) - vs.clientHeight)}px`;
+  }
+  function setTop(r, fromScroll) {
+    topRow = clamp(r, 0, maxTop());
+    if (!fromScroll) {
+      const range = vs.scrollHeight - vs.clientHeight;
+      expected = maxTop() ? Math.round((topRow / maxTop()) * range) : 0;
+      vs.scrollTop = expected;
+    }
+    requestRender();
+  }
+  vs.addEventListener('scroll', () => {                 // scrollbar drags; wheel input is handled below
+    if (Math.abs(vs.scrollTop - expected) <= 1) return;
+    const range = vs.scrollHeight - vs.clientHeight;
+    expected = vs.scrollTop;
+    topRow = range > 0 ? (vs.scrollTop / range) * maxTop() : 0;
+    requestRender();
+  });
+  vs.addEventListener('wheel', (e) => {                 // millions of rows do not fit in a scrollable element, so scroll by rows
+    if (e.ctrlKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    e.preventDefault();
+    setTop(topRow + (e.deltaMode === 1 ? e.deltaY * 3 : e.deltaY / ROW));
+  }, { passive: false });
+  function requestRender() { if (!rafPending) { rafPending = true; requestAnimationFrame(() => { rafPending = false; render(); }); } }
+  function fetchPage(p) {
+    const pg = { rows: null, promise: null };
+    pages.set(p, pg);
+    pg.promise = call('rows', { start: p * PAGE, count: PAGE }).then((rows) => {
+      pg.rows = rows;
+      if (pages.size > 40) { const here = Math.floor(topRow / PAGE); for (const k of [...pages.keys()]) if (Math.abs(k - here) > 4) pages.delete(k); }
+      if (pages.get(p) === pg) requestRender();
+    }).catch(() => { pg.rows = []; });
+    return pg;
+  }
+  function rowAt(k) { const p = Math.floor(k / PAGE), pg = pages.get(p) || fetchPage(p); return pg.rows ? pg.rows[k - p * PAGE] : null; }
+  async function rowReady(k) { const p = Math.floor(k / PAGE), pg = pages.get(p) || fetchPage(p); await pg.promise; return pg.rows[k - p * PAGE]; }
+  const oneLine = (s) => (s.length > 700 ? s.slice(0, 700) + '…' : s).replace(/\s*\n\s*/g, ' ⏎ ');
+  function mark(text) {                                 // escape, highlighting what the search terms matched
+    if (!view.hl.length) return esc(text);
+    const spans = [];
+    for (const re of view.hl) {
+      re.lastIndex = 0;
+      for (let m, guard = 0; (m = re.exec(text)) && guard < 300; guard++) { if (!m[0].length) { re.lastIndex++; continue; } spans.push([m.index, m.index + m[0].length]); }
+    }
+    if (!spans.length) return esc(text);
+    spans.sort((a, b) => a[0] - b[0]);
+    let out = '', p = 0;
+    for (const [a, b] of spans) { if (b <= p) continue; const st = Math.max(a, p); out += esc(text.slice(p, st)) + '<mark>' + esc(text.slice(st, b)) + '</mark>'; p = b; }
+    return out + esc(text.slice(p));
+  }
+  function render() {
+    if (!info) return;
+    const first = Math.floor(topRow), n = Math.min(visibleRows() + 1, view.count - first);
+    let html = '';
+    for (let k = first; k < first + n; k++) {
+      const r = rowAt(k);
+      if (!r) { html += `<div class="r ph" data-k="${k}"><span class="c t">…</span></div>`; continue; }
+      const sev = info.lvlSev[r[3]], src = info.sources[r[2]];
+      html += `<div class="r s${sev}${r[0] === selPos ? ' sel' : ''}" data-k="${k}">` +
+        `<span class="c t">${pins.has(r[0]) ? '<b class="pin" title="Pinned">★</b>' : ''}${fmtTime(r[1])}</span>` +
+        `<span class="c sv"><i></i>${SEV[sev]}</span>` +
+        `<span class="c so" title="${esc(src.path)}">${esc(src.short)}</span>` +
+        `<span class="c p">${esc(info.names.proc[r[4]])}${r[5] ? `<u>${r[5]}</u>` : ''}</span>` +
+        `<span class="c m">${mark(oneLine(r[9]))}</span></div>`;
+    }
+    rowsEl.innerHTML = html;
+    $('#empty').hidden = view.count > 0 || !info.total;
+  }
+  rowsEl.addEventListener('click', (e) => { const el = e.target.closest('.r'); if (el) select(+el.dataset.k, true); });
+  async function select(k, open) {
+    if (k < 0 || k >= view.count) return;
+    selIndex = k;
+    if (k < Math.floor(topRow)) setTop(k); else if (k > Math.floor(topRow) + visibleRows() - 2) setTop(k - visibleRows() + 2);
+    const r = await rowReady(k);
+    if (selIndex !== k || !r) return;
+    selPos = r[0];
+    requestRender();
+    if (open || !$('#detail').hidden) showDetail(r[0]);
+  }
+  const moveSel = (d) => select(clamp((selIndex >= 0 ? selIndex : Math.floor(topRow) - (d > 0 ? 1 : 0)) + d, 0, view.count - 1), false);
+  async function nextSev(dir) {
+    const from = selIndex >= 0 ? selIndex : Math.floor(topRow) - (dir > 0 ? 1 : 0);
+    const k = await call('findSev', { from, dir, min: 4 });
+    if (k < 0) return flash(dir > 0 ? 'No later errors in these results' : 'No earlier errors in these results');
+    await select(k, false);
+    setTop(k - Math.floor(visibleRows() / 3));
+  }
+  function flash(msg) { const el = $('#flash'); el.textContent = msg; el.hidden = false; clearTimeout(flash.t); flash.t = setTimeout(() => { el.hidden = true; }, 2200); }
+
+  // ---------- detail panel ----------
+  async function showDetail(pos) {
+    let d;
+    try { d = await call('row', { pos }); } catch (e) { return; }
+    if (selPos !== pos) return;
+    const r = d.row, sev = info.lvlSev[r[3]], src = info.sources[r[2]], N = info.names, el = $('#detail');
+    const filt = (name, v) => `<span class="fb"><button data-f="${name}" data-v="${v}" data-m="inc" title="Show only this">+</button><button data-f="${name}" data-v="${v}" data-m="exc" title="Hide this">−</button></span>`;
+    const rows = [
+      ['Time', `${esc(fmtTime(r[1]))} <span class="dim">${tzLabel(r[1])}${tzMode !== 'utc' ? ` · ${new Date(Math.floor(r[1])).toISOString().replace('T', ' ').replace('Z', '')} UTC` : ''}</span>`],
+      ['Severity', `<span class="sv s${sev}"><i></i>${SEV[sev]}</span>${N.lvl[r[3]] && N.lvl[r[3]] !== SEV[sev] ? ` <span class="dim">logged as ${esc(N.lvl[r[3]])}</span>` : ''}${filt('sev', sev)}`],
+      ['Source', `${esc(src.group)} <span class="dim">${esc(src.path)}</span>${filt('file', r[2])}`],
+      N.proc[r[4]] && ['Process', `${esc(N.proc[r[4]])}${filt('proc', r[4])}`],
+      r[5] && ['PID', `${r[5]} <span class="fb"><button data-pid="${r[5]}" title="Add pid:${r[5]} to the search">+</button></span>`],
+      N.sub[r[6]] && ['Subsystem / area', `${esc(N.sub[r[6]])}${filt('sub', r[6])}`],
+      N.cat[r[7]] && ['Category', `${esc(N.cat[r[7]])}${filt('cat', r[7])}`],
+      r[8] && ['Tags', N.tag.map((t, b) => ((r[8] >> b) & 1 ? `${esc(t)}${filt('tag', b)}` : '')).filter(Boolean).join(' ')],
+      ...Object.entries(d.extra || {}).filter(([k, v]) => v && k !== 'file').map(([k, v]) => [k, esc(v)]),
+    ].filter(Boolean);
+    let json = '';
+    const msg = r[9], brace = msg.indexOf('{');
+    if (brace >= 0 && msg.length < 400000) { try { const o = JSON.parse(msg.slice(brace)); if (o && typeof o === 'object') json = JSON.stringify(o, null, 2); } catch (e) { /* not JSON */ } }
+    const fileIdx = d.extra && d.extra.file ? info.files.findIndex((f) => f.path === d.extra.file) : src.virtual ? -1 : info.files.findIndex((f) => f.path === src.path);
+    el.innerHTML = `<div class="dbar">
+        <button data-act="pin">${pins.has(pos) ? '★ Unpin' : '☆ Pin'}</button>
+        <button data-act="context" ${filtersActive() ? '' : 'disabled'} title="Clear the filters but stay on this entry">Show in context</button>
+        <span class="grp">Zoom to <button data-act="win" data-w="5000">±5 s</button><button data-act="win" data-w="60000">±1 min</button><button data-act="win" data-w="600000">±10 min</button></span>
+        <button data-act="copy">Copy line</button>
+        ${fileIdx >= 0 ? `<button data-act="file" data-i="${fileIdx}">${d.extra && d.extra.file ? 'Open report' : 'Open file'}</button>` : ''}
+        <span class="spacer"></span><button data-act="close" aria-label="Close details">✕</button></div>
+      <div class="dbody"><dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>
+      <div class="dmsg"><pre>${mark(json ? msg.slice(0, brace) : msg)}</pre>${json ? `<pre class="json">${mark(json)}</pre>` : ''}${r[10] ? '<p class="dim">This entry is longer than 2 MB; the rest is not shown.</p>' : ''}</div></div>`;
+    el.hidden = false;
+    el._row = d;
+    layout(); setTop(topRow);
+    if (selIndex >= 0 && selIndex > Math.floor(topRow) + visibleRows() - 2) setTop(selIndex - visibleRows() + 2);
+  }
+  $('#detail').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    const d = $('#detail')._row, pos = d.row[0], t = d.row[1];
+    if (b.dataset.f) return toggleFacet(b.dataset.f, +b.dataset.v, b.dataset.m);
+    if (b.dataset.pid) { addTerm(`pid:${b.dataset.pid}`); return; }
+    switch (b.dataset.act) {
+      case 'pin': togglePin(d.row); showDetail(pos); break;
+      case 'context': clearFilters(); break;
+      case 'win': setRange(t - +b.dataset.w, t + +b.dataset.w); break;
+      case 'copy': navigator.clipboard.writeText(d.raw).then(() => flash('Copied'), () => flash('Copy was blocked by the browser')); break;
+      case 'file': openFile(+b.dataset.i); break;
+      case 'close': closeDetail(); break;
+    }
+  });
+  function closeDetail() { $('#detail').hidden = true; layout(); setTop(topRow); }
+  function addTerm(term) { const q = $('#q'); q.value = (q.value.trim() + ' ' + term).trim(); S.text = q.value; schedule(); }
+  function togglePin(row) { if (pins.has(row[0])) pins.delete(row[0]); else pins.set(row[0], row); updatePins(); requestRender(); if (S.pinnedOnly) schedule(); }
+  function updatePins() {
+    const b = $('#pinnedOnly');
+    if (!pins.size) S.pinnedOnly = false;
+    b.textContent = `★ Pinned (${pins.size})`;
+    b.disabled = !pins.size;
+    b.classList.toggle('on', S.pinnedOnly);
+  }
+
+  // ---------- files tab ----------
+  function buildTree(filter) {
+    const el = $('#tree'), f = filter.trim().toLowerCase();
+    const link = (x, label) => `<a class="tf${x.src >= 0 && x.rows ? ' src' : ''}" data-i="${x.i}" title="${esc(x.path)}"><span>${esc(label)}</span><span class="n">${fmtBytes(x.size)}</span></a>`;
+    if (f) {
+      const hits = info.files.filter((x) => x.path.toLowerCase().includes(f));
+      el.innerHTML = hits.slice(0, 500).map((x) => link(x, x.path)).join('') + (hits.length > 500 ? `<div class="more">${fmtN(hits.length - 500)} more matches</div>` : '') || '<div class="more">No files match.</div>';
+      return;
+    }
+    const root = { dirs: new Map(), files: [], count: 0 };
+    for (const x of info.files) {
+      const parts = x.path.split('/');
+      let node = root;
+      node.count++;
+      for (let i = 0; i < parts.length - 1; i++) { if (!node.dirs.has(parts[i])) node.dirs.set(parts[i], { dirs: new Map(), files: [], count: 0 }); node = node.dirs.get(parts[i]); node.count++; }
+      node.files.push(x);
+    }
+    const html = (node, depth) => [...node.dirs].map(([name, d]) => `<details${depth < 1 && d.count <= 60 ? ' open' : ''}><summary>${esc(name)}<span class="n">${fmtN(d.count)}</span></summary>${html(d, depth + 1)}</details>`).join('') +
+      node.files.map((x) => link(x, x.path.slice(x.path.lastIndexOf('/') + 1))).join('');
+    el.innerHTML = html(root, 0);
+  }
+  const isBinary = (b) => { const n = Math.min(b.length, 4096); let odd = 0; for (let i = 0; i < n; i++) { const c = b[i]; if (c === 0) return true; if (c < 9 || (c > 13 && c < 32)) odd++; } return odd > n / 10; };
+  function hexDump(b) {
+    let out = '';
+    for (let o = 0; o < b.length; o += 16) {
+      const row = b.subarray(o, o + 16);
+      out += `${o.toString(16).padStart(6, '0')}  ${[...row].map((c) => c.toString(16).padStart(2, '0')).join(' ').padEnd(48)}  ${[...row].map((c) => (c >= 32 && c < 127 ? String.fromCharCode(c) : '.')).join('')}\n`;
+    }
+    return out;
+  }
+  function tableHtml(text, sep) {
+    const lines = text.split(/\r?\n/).filter(Boolean), head = lines[0].split(sep);
+    return `<table><thead><tr>${head.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${lines.slice(1, 3001).map((l) => `<tr>${l.split(sep).map((c) => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>` +
+      (lines.length > 3001 ? `<p class="dim">Showing the first 3,000 of ${fmtN(lines.length - 1)} rows.</p>` : '');
+  }
+  let openState = null;
+  async function openFile(i) {
+    const f = info.files[i], el = $('#fileview');
+    showTab('files');
+    for (const a of document.querySelectorAll('#tree a.on')) a.classList.remove('on');
+    const a = $(`#tree a[data-i="${i}"]`);
+    if (a) {
+      a.classList.add('on');
+      for (let p = a.parentElement; p && p.id !== 'tree'; p = p.parentElement) if (p.tagName === 'DETAILS') p.open = true;
+      a.scrollIntoView({ block: 'nearest' });
+    }
+    const table = /\.(tsv|csv)$/i.test(f.path) && f.src < 0 && f.size <= 4 << 20;
+    el.innerHTML = `<div class="fhead"><h2>${esc(f.path)}</h2><span class="dim">${fmtBytes(f.size)}</span>` +
+      (f.src >= 0 ? `<button data-src="${f.src}">Show its ${fmtN(f.rows)} entries on the timeline</button>` : '') +
+      `<span class="spacer"></span><input id="lineFilter" type="search" placeholder="Filter lines" aria-label="Filter lines" hidden></div><div id="fbody" class="fbody"><p class="dim">Loading…</p></div>`;
+    const state = openState = { i, text: '', loaded: 0, size: f.size };
+    const got = await call('fileChunk', { i, offset: 0, len: table ? 4 << 20 : 512 << 10 });
+    if (openState !== state) return;
+    const bytes = new Uint8Array(got.bytes), body = $('#fbody');
+    state.size = got.size; state.loaded = bytes.length;
+    if (!bytes.length) { body.innerHTML = '<p class="dim">This file is empty.</p>'; return; }
+    if (isBinary(bytes)) {
+      const odl = /\.(odl|odlgz|odlsent|aodl)$/i.test(f.path);
+      body.innerHTML = `<p class="dim">${odl ? 'OneDrive sync logs are stored in an obfuscated binary format that only Microsoft can decode.' : 'This is a binary file.'} First ${fmtN(Math.min(2048, bytes.length))} bytes:</p><pre>${esc(hexDump(bytes.subarray(0, 2048)))}</pre>`;
+      return;
+    }
+    state.text = new TextDecoder().decode(bytes);
+    if (/\.md$/i.test(f.path)) body.innerHTML = `<div class="doc">${md(state.text)}</div>`;
+    else if (table) body.innerHTML = `<div class="tbl">${tableHtml(state.text, /\.csv$/i.test(f.path) ? ',' : '\t')}</div>`;
+    else { $('#lineFilter').hidden = false; renderText(); }
+  }
+  function renderText() {
+    const st = openState, body = $('#fbody'), f = ($('#lineFilter').value || '').toLowerCase();
+    const text = f ? st.text.split('\n').filter((l) => l.toLowerCase().includes(f)).join('\n') : st.text;
+    body.innerHTML = `<pre>${esc(text)}</pre>` + (st.loaded < st.size ? `<p><button id="more">Load the next ${fmtBytes(Math.min(2 << 20, st.size - st.loaded))}</button> <span class="dim">${fmtBytes(st.loaded)} of ${fmtBytes(st.size)} shown</span></p>` : '');
+  }
+  $('#fileview').addEventListener('click', async (e) => {
+    if (e.target.dataset.src) { S.facets = { file: { inc: [+e.target.dataset.src], exc: [] } }; S.text = ''; $('#q').value = ''; S.t0 = S.t1 = null; showTab('timeline'); schedule(); return; }
+    if (e.target.id === 'more') {
+      const st = openState, got = await call('fileChunk', { i: st.i, offset: st.loaded, len: 2 << 20 });
+      if (openState !== st) return;
+      st.text += new TextDecoder().decode(got.bytes); st.loaded += got.bytes.byteLength;
+      renderText();
+    }
+  });
+  $('#fileview').addEventListener('input', (e) => { if (e.target.id === 'lineFilter') renderText(); });
+
+  // ---------- small markdown renderer (summary.md, incident_context.md) ----------
+  function md(src) {
+    const lines = src.split(/\r?\n/), inline = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+    let out = '', i = 0;
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim()) { i++; continue; }
+      const h = /^(#{1,6}) (.*)$/.exec(l);
+      if (h) { out += `<h${Math.min(6, h[1].length + 2)}>${inline(h[2])}</h${Math.min(6, h[1].length + 2)}>`; i++; continue; }
+      if (l.startsWith('|')) {
+        const rows = [];
+        while (i < lines.length && lines[i].startsWith('|')) { if (!/^\|[\s:|-]+$/.test(lines[i])) rows.push(lines[i].replace(/^\||\|\s*$/g, '').split('|').map((c) => c.trim())); i++; }
+        out += `<table><thead><tr>${rows[0].map((c) => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>${rows.slice(1).map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+        continue;
+      }
+      const li = /^\s*([-*]|\d+\.) (.*)$/.exec(l);
+      if (li) {
+        const tag = /\d/.test(li[1]) ? 'ol' : 'ul';
+        out += `<${tag}>`;
+        for (let m; i < lines.length && (m = /^\s*([-*]|\d+\.) (.*)$/.exec(lines[i])); i++) out += `<li>${inline(m[2])}</li>`;
+        out += `</${tag}>`;
+        continue;
+      }
+      if (/^ {4}/.test(l)) { let code = ''; while (i < lines.length && (/^ {4}/.test(lines[i]) || !lines[i].trim())) code += lines[i++].slice(4) + '\n'; out += `<pre>${esc(code.trimEnd())}</pre>`; continue; }
+      let para = '';
+      while (i < lines.length && lines[i].trim() && !/^(#{1,6} |\||\s*([-*]|\d+\.) )/.test(lines[i])) para += lines[i++] + ' ';
+      out += `<p>${inline(para.trim())}</p>`;
+    }
+    return out;
+  }
+
+  // ---------- overview tab ----------
+  async function renderOverview() {
+    const el = $('#overview'), gen = info;
+    const src = info.sources.filter((s) => s.rows);
+    let html = `<div class="tiles"><div><b>${fmtN(info.total)}</b><span>timeline entries</span></div><div><b>${fmtN(src.length)}</b><span>log sources</span></div>` +
+      `<div><b>${fmtN(info.files.length)}</b><span>files in the bundle</span></div><div><b>${fmtBytes(info.files.reduce((a, f) => a + f.size, 0))}</b><span>unpacked</span></div></div>`;
+    for (const n of info.notes) html += `<p class="note">${esc(n)}</p>`;
+    html += `<h2>Sources on the timeline</h2><div class="tbl"><table><thead><tr><th>Source</th><th>File</th><th class="num">Entries</th><th>First entry</th><th>Last entry</th><th class="num">Size</th></tr></thead><tbody>` +
+      src.map((s) => `<tr><td>${esc(s.group)}</td><td><a data-src="${s.id}" title="Show only this file on the timeline">${esc(s.path)}</a></td><td class="num">${fmtN(s.rows)}</td><td>${fmtTime(s.t0, false)}</td><td>${fmtTime(s.t1, false)}</td><td class="num">${fmtBytes(s.size)}</td></tr>`).join('') +
+      `</tbody></table></div><p class="dim">Times are shown in ${tzMode === 'utc' ? 'UTC' : tzMode === 'bundle' ? "the Mac's own time zone" : "this computer's time zone"}.</p><div id="docs"></div>`;
+    el.innerHTML = html;
+    const docs = [['summary.md', 'Collector summary', true], ['case/incident_context.md', 'Incident context', true], ['reports/crash_summary.txt', 'Crash and hang report summary', true],
+      ['unified_logs/collection_status.txt', 'Unified log collection status', true], ['office/versions.txt', 'Office versions', false], ['system/system_info.txt', 'System information', false], ['collection.log', 'Collection log', false]];
+    for (const [path, title, open] of docs) {
+      const f = info.files.find((x) => x.path === path);
+      if (!f || !f.size) continue;
+      const got = await call('fileChunk', { i: f.i, offset: 0, len: 256 << 10 });
+      if (info !== gen) return;
+      const text = new TextDecoder().decode(got.bytes), d = document.createElement('details');
+      d.open = open;
+      d.innerHTML = `<summary>${esc(title)} <span class="dim">${esc(path)}</span></summary><div class="doc">${/\.md$/.test(path) ? md(text) : `<pre>${esc(text)}</pre>`}</div>`;
+      $('#docs').append(d);
+    }
+  }
+  $('#overview').addEventListener('click', (e) => {
+    if (e.target.dataset.src) { S.facets = { file: { inc: [+e.target.dataset.src], exc: [] } }; S.text = ''; $('#q').value = ''; S.t0 = S.t1 = null; showTab('timeline'); schedule(); }
+  });
+
+  // ---------- memory tab (watch / repro modes write excel_memory_timeline.csv) ----------
+  let mem = null;
+  async function loadMemory(f) {
+    const gen = info, got = await call('fileChunk', { i: f.i, offset: 0, len: 16 << 20 });
+    if (info !== gen) return;
+    const lines = new TextDecoder().decode(got.bytes).split(/\r?\n/).filter(Boolean), head = lines[0].split(','), col = (n) => head.indexOf(n);
+    const rows = lines.slice(1).map((l) => l.split(','));
+    const num = (n) => rows.map((r) => (r[col(n)] === '' || r[col(n)] == null ? NaN : +r[col(n)]));
+    mem = { file: f, t: rows.map((r) => { const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)/.exec(r[col('utc_time')] || ''); return m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : NaN; }),
+      pid: rows.map((r) => r[col('excel_pid')] || ''), foot: num('excel_footprint_mb'), cmp: num('excel_compressed_mb'), cpu: num('excel_cpu_pct'),
+      level: num('pressure_level'), free: num('free_mb'), comp: num('compressor_mb'), swap: num('swap_used_mb') };
+    if (currentTab() === 'memory') drawMemory();
+  }
+  function drawMemory() {
+    if (!mem) return;
+    const el = $('#memory'), events = [], LV = { 1: 'normal', 2: 'warning', 4: 'critical' };
+    for (let i = 1; i < mem.t.length; i++) {
+      if (mem.pid[i] !== mem.pid[i - 1]) events.push([mem.t[i], !mem.pid[i] ? `Excel stopped running (was PID ${mem.pid[i - 1]}): quit, crash or force-quit` : !mem.pid[i - 1] ? `Excel started (PID ${mem.pid[i]})` : `Excel was relaunched (PID ${mem.pid[i - 1]} to ${mem.pid[i]})`]);
+      if (mem.level[i] !== mem.level[i - 1] && mem.level[i] === mem.level[i]) events.push([mem.t[i], `Memory pressure changed to ${LV[mem.level[i]] || mem.level[i]}`]);
+    }
+    const peak = Math.max(...mem.foot.filter((v) => v === v), 0);
+    el.innerHTML = `<p class="dim">${fmtN(mem.t.length)} samples from <a data-i="${mem.file.i}">${esc(mem.file.path)}</a> (opens as a table). Click a chart to jump to that moment on the timeline.</p>
+      <div class="tiles"><div><b>${fmtN(peak)} MB</b><span>peak Excel footprint</span></div><div><b>${fmtN(events.filter((e) => /stopped|relaunched/.test(e[1])).length)}</b><span>times Excel stopped or restarted</span></div>
+      <div><b>${LV[Math.max(...mem.level.filter((v) => v === v), 1)] || '?'}</b><span>highest memory pressure</span></div></div>
+      <h2>Excel memory</h2><div class="chart" id="ch1"></div><h2>System memory</h2><div class="chart" id="ch2"></div>
+      <h2>Events</h2>${events.length ? `<ul class="events">${events.map(([t, m]) => `<li><a data-t="${t}">${fmtTime(t, false)}</a> ${esc(m)}</li>`).join('')}</ul>` : '<p class="dim">Excel kept the same PID and memory pressure did not change.</p>'}`;
+    lineChart($('#ch1'), mem.t, [{ name: 'Physical footprint', cls: 'c1', v: mem.foot }, { name: 'Compressed', cls: 'c2', v: mem.cmp }]);
+    lineChart($('#ch2'), mem.t, [{ name: 'Free', cls: 'c1', v: mem.free }, { name: 'Held by the compressor', cls: 'c2', v: mem.comp }, { name: 'Swap used', cls: 'c3', v: mem.swap }]);
+  }
+  function lineChart(el, t, series) {
+    const W = el.clientWidth || 800, H = 230, L = 56, R = 14, T = 10, B = 24, pw = W - L - R, ph = H - T - B;
+    const ok = t.map((v, i) => (v === v ? i : -1)).filter((i) => i >= 0);
+    if (!ok.length) { el.textContent = 'No samples.'; return; }
+    const t0 = t[ok[0]], t1 = Math.max(t[ok[ok.length - 1]], t0 + 1);
+    let max = 1;
+    for (const s of series) for (const v of s.v) if (v > max) max = v;
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * 10 ** Math.floor(Math.log10(max / 4))).find((x) => max / x <= 5) || max;
+    const top = Math.ceil(max / step) * step, X = (v) => L + ((v - t0) / (t1 - t0)) * pw, Y = (v) => T + ph - (v / top) * ph;
+    let s = `<svg width="${W}" height="${H}" role="img" aria-label="${esc(series.map((x) => x.name).join(', '))} in megabytes over time">`;
+    for (let v = 0; v <= top + 1e-9; v += step) s += `<line class="${v ? 'grid' : 'axis'}" x1="${L}" x2="${W - R}" y1="${Y(v) + 0.5}" y2="${Y(v) + 0.5}"/><text class="tick" x="${L - 8}" y="${Y(v) + 4}" text-anchor="end">${fmtN(v)}</text>`;
+    const nt = clamp(Math.floor(pw / 150), 2, 8);
+    for (let i = 0; i <= nt; i++) { const tv = t0 + ((t1 - t0) * i) / nt; s += `<text class="tick" x="${X(tv)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === nt ? 'end' : 'middle'}">${fmtTime(tv, false).slice(t1 - t0 > 36 * 3600e3 ? 5 : 11, 16)}</text>`; }
+    for (const sr of series) {
+      let d = '', pen = false;
+      for (const i of ok) { const v = sr.v[i]; if (v !== v) { pen = false; continue; } d += `${pen ? 'L' : 'M'}${X(t[i]).toFixed(1)},${Y(v).toFixed(1)}`; pen = true; }
+      s += `<path class="ln ${sr.cls}" d="${d}"/>`;
+    }
+    s += `<line class="cross" y1="${T}" y2="${T + ph}" visibility="hidden"/>${series.map((sr) => `<circle class="dot ${sr.cls}" r="4" visibility="hidden"/>`).join('')}</svg>`;
+    el.innerHTML = `<div class="legend">${series.map((sr) => `<span><i class="key ${sr.cls}"></i>${esc(sr.name)}</span>`).join('')}<span class="dim">MB</span></div>${s}<div class="tip" hidden></div>`;
+    const svg = $('svg', el), tip = $('.tip', el), cross = $('.cross', el), dots = [...el.querySelectorAll('.dot')];
+    const nearest = (e) => { const x = e.clientX - svg.getBoundingClientRect().left, tv = t0 + ((x - L) / pw) * (t1 - t0); let best = ok[0]; for (const i of ok) if (Math.abs(t[i] - tv) < Math.abs(t[best] - tv)) best = i; return best; };
+    svg.addEventListener('pointermove', (e) => {
+      const i = nearest(e), x = X(t[i]);
+      cross.setAttribute('x1', x); cross.setAttribute('x2', x); cross.setAttribute('visibility', 'visible');
+      tip.replaceChildren();
+      const head = document.createElement('div');
+      head.className = 'tt'; head.textContent = fmtTime(t[i], false);
+      tip.append(head);
+      series.forEach((sr, k) => {
+        const v = sr.v[i], row = document.createElement('div'), key = document.createElement('i'), val = document.createElement('b');
+        key.className = `key ${sr.cls}`; val.textContent = v === v ? `${fmtN(v)} MB` : 'no sample';
+        row.append(key, val, ` ${sr.name}`);
+        tip.append(row);
+        dots[k].setAttribute('visibility', v === v ? 'visible' : 'hidden');
+        if (v === v) { dots[k].setAttribute('cx', x); dots[k].setAttribute('cy', Y(v)); }
+      });
+      tip.hidden = false;
+      tip.style.left = `${clamp(x + 14, 0, W - tip.offsetWidth - 4)}px`;
+    });
+    svg.addEventListener('pointerleave', () => { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); dots.forEach((d) => d.setAttribute('visibility', 'hidden')); });
+    svg.addEventListener('click', (e) => jumpTo(t[nearest(e)]));
+  }
+  async function jumpTo(t) {                            // open the timeline at a moment, widening the window if needed
+    if ((S.t0 != null && t < S.t0) || (S.t1 != null && t > S.t1)) { S.t0 = S.t1 = null; await runQuery(); }
+    showTab('timeline');
+    const k = await call('seek', { t });
+    setTop(k - 3);
+    select(k, false);
+  }
+  $('#memory').addEventListener('click', (e) => { if (e.target.dataset.t) jumpTo(+e.target.dataset.t); else if (e.target.dataset.i) openFile(+e.target.dataset.i); });
+
+  // ---------- wiring ----------
+  $('#q').addEventListener('input', (e) => { S.text = e.target.value; schedule(250); });
+  $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { S.text = e.target.value; schedule(); vs.focus(); } });
+  $('#caseSens').addEventListener('change', (e) => { S.cs = e.target.checked; schedule(); });
+  $('#clear').addEventListener('click', clearFilters);
+  $('#prevErr').addEventListener('click', () => nextSev(-1));
+  $('#nextErr').addEventListener('click', () => nextSev(1));
+  $('#pinnedOnly').addEventListener('click', () => { S.pinnedOnly = !S.pinnedOnly; updatePins(); schedule(); });
+  $('#export').addEventListener('click', async () => {
+    if (!view.count) return flash('Nothing to export');
+    try {
+      const blob = await call('exportTsv'), a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = `${info.name}_filtered.tsv`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      $('#searchbar').hidden = true;
+      $('#count').textContent = `${fmtN(view.count)} of ${fmtN(view.total)} entries`;
+      flash(`Exported ${fmtN(view.count)} entries`);
+    } catch (e) { if (e.message !== 'superseded') flash(e.message); }
+  });
+  $('#help').addEventListener('click', () => $('#helpDlg').showModal());
+  $('#facets').addEventListener('click', (e) => {
+    const fv = e.target.closest('.fv');
+    if (!fv) return;
+    toggleFacet(fv.closest('details').dataset.f, +fv.dataset.v, e.target.closest('.x') || e.altKey ? 'exc' : 'inc');
+  });
+  $('#facets').addEventListener('toggle', (e) => { const n = e.target.dataset && e.target.dataset.f; if (n) { if (e.target.open) openFacets.add(n); else openFacets.delete(n); } }, true);
+  $('#facetToggle').addEventListener('click', () => $('#tab-timeline').classList.toggle('nofacets'));
+  for (const id of ['tFrom', 'tTo']) {
+    $('#' + id).addEventListener('change', () => {
+      const a = parseTime($('#tFrom').value), b = parseTime($('#tTo').value);
+      if (a !== a || b !== b || b <= a) { flash('Use YYYY-MM-DD HH:MM:SS, with the start before the end'); renderRange(); return; }
+      setRange(a, b);
+    });
+  }
+  $('#allTime').addEventListener('click', () => { S.t0 = S.t1 = null; $('#banner').hidden = true; schedule(); });
+  $('#bannerAll').addEventListener('click', () => { S.t0 = S.t1 = null; $('#banner').hidden = true; schedule(); });
+  $('#bannerClose').addEventListener('click', () => { $('#banner').hidden = true; layout(); setTop(topRow); });
+  $('#zoomOut').addEventListener('click', () => {
+    const t0 = S.t0 != null ? S.t0 : info.t0, t1 = S.t1 != null ? S.t1 : info.t1, half = (t1 - t0) / 2;
+    setRange(t0 - half, t1 + half);
+  });
+  $('#tz').addEventListener('change', (e) => { tzMode = e.target.value; requestRender(); if (view.hist) drawHist(); renderRange(); renderOverview(); if (selPos != null && !$('#detail').hidden) showDetail(selPos); if (currentTab() === 'memory') drawMemory(); });
+  document.querySelector('.tabs').addEventListener('click', (e) => { if (e.target.dataset.tab) showTab(e.target.dataset.tab); });
+  $('#tree').addEventListener('click', (e) => { const a = e.target.closest('a'); if (a) openFile(+a.dataset.i); });
+  $('#treeFilter').addEventListener('input', (e) => buildTree(e.target.value));
+  $('#openAnother').addEventListener('click', () => { if (worker) worker.terminate(); worker = null; info = null; setTimeout(sweepTemp, 600); $('#app').hidden = true; $('#landing').hidden = false; document.title = 'Excel diagnostics viewer'; });
+  new ResizeObserver(() => { if (!info || $('#app').hidden) return; if (currentTab() === 'timeline') { layout(); setTop(topRow); clearTimeout(drawHist.t); drawHist.t = setTimeout(() => { if (view.hist && Math.abs(clamp(Math.floor($('#hist').clientWidth / 8), 30, 240) - view.hist.nb) > 8) schedule(); else drawHist(); }, 150); } else if (currentTab() === 'memory') drawMemory(); }).observe(document.body);
+
+  document.addEventListener('keydown', (e) => {
+    if (!info || $('#app').hidden || e.metaKey || e.ctrlKey || e.altKey || $('#helpDlg').open) return;
+    if (e.target.matches && e.target.matches('input, textarea, select')) { if (e.key === 'Escape') e.target.blur(); return; }
+    if (currentTab() !== 'timeline') return;
+    const page = visibleRows() - 1;
+    const keys = { '/': () => $('#q').focus(), ArrowDown: () => moveSel(1), j: () => moveSel(1), ArrowUp: () => moveSel(-1), k: () => moveSel(-1), PageDown: () => moveSel(page), PageUp: () => moveSel(-page),
+      Home: () => select(0, false), End: () => select(view.count - 1, false), Enter: () => { if (selPos != null) showDetail(selPos); }, Escape: closeDetail,
+      e: () => nextSev(1), E: () => nextSev(-1), p: () => { const d = $('#detail')._row; if (selPos != null && d && d.row[0] === selPos) { togglePin(d.row); if (!$('#detail').hidden) showDetail(selPos); } else if (selIndex >= 0) rowReady(selIndex).then(togglePin); },
+      c: () => { if (filtersActive()) clearFilters(); } };
+    if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
+  });
+
+  // ---------- opening bundles ----------
+  async function fromDrop(dt) {
+    const entries = [...dt.items].map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null)).filter(Boolean);
+    if (!entries.length) return [...dt.files].map((f) => ({ path: f.name, blob: f }));
+    const out = [];
+    const walk = async (en, prefix) => {
+      if (en.isFile) out.push({ path: prefix + en.name, blob: await new Promise((res, rej) => en.file(res, rej)) });
+      else {
+        const rd = en.createReader();
+        for (;;) { const batch = await new Promise((res, rej) => rd.readEntries(res, rej)); if (!batch.length) break; for (const c of batch) await walk(c, `${prefix}${en.name}/`); }
+      }
+    };
+    for (const en of entries) await walk(en, '');
+    return out;
+  }
+  let dragDepth = 0;
+  document.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++; document.body.classList.add('drag'); });
+  document.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('drag'); } });
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', async (e) => {
+    e.preventDefault(); dragDepth = 0; document.body.classList.remove('drag');
+    try { start(await fromDrop(e.dataTransfer)); } catch (err) { fail(`Could not read what was dropped: ${err.message || err}`); }
+  });
+  const picked = (e) => { start([...e.target.files].map((f) => ({ path: f.webkitRelativePath || f.name, blob: f }))); e.target.value = ''; };
+  $('#pickFiles').addEventListener('change', picked);
+  $('#pickDir').addEventListener('change', picked);
+  $('#btnFiles').addEventListener('click', () => $('#pickFiles').click());
+  $('#btnDir').addEventListener('click', () => $('#pickDir').click());
+  $('#btnSample').addEventListener('click', () => start(null, true));
+  window.logViewer = { load: (inputs) => start(inputs), sample: () => start(null, true), state: () => ({ S, view, info, selPos, selIndex, topRow }) };
+})();
+
+</script>
+</body>
+</html>
