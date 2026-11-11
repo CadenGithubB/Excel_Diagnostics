@@ -5,3 +5,6 @@ dev.html
 Excel_Diagnostics_*/
 Excel_Diagnostics_*.zip
 Excel_Diagnostics_*.sha256
+
+# Written by openclaw/Install.command; it names folders on the host.
+openclaw/install-report.txt

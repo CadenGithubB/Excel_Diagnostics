@@ -36,9 +36,16 @@
         <button id="btnScriptView">View it</button>
       </div>
     </div>
+    <div class="getscript">
+      <div><b>Working in a terminal, or handing this to an agent?</b> <span class="dim"><code>excel_diagnostics_cli.mjs</code> searches a bundle without a browser, and each command says what to run next.</span></div>
+      <div class="acts">
+        <button id="btnCli">Download the tool</button>
+        <button id="btnCliView">About it</button>
+      </div>
+    </div>
     <ul class="facts">
       <li><b>Nothing is uploaded.</b> The page has no server side, and its security policy blocks every network request, so it could not send the logs anywhere. You can save this page and use it offline.</li>
-      <li><b>One timeline.</b> The macOS unified log, Excel's own diagnostics, AutoUpdate, OneDrive, install history, sleep and wake, and each crash or hang report are merged by time and shown in the Mac's own time zone.</li>
+      <li><b>One timeline.</b> The macOS unified log, Excel's own diagnostics, AutoUpdate, OneDrive, install history, sleep and wake, and each crash or hang report are merged by time and shown in the time zone of the Mac they came from.</li>
       <li><b>Large captures are fine.</b> Logs are read from disk as you search instead of being loaded into memory. A bundle over about 1 GB opens fastest from its unzipped folder.</li>
     </ul>
   </div>
@@ -68,6 +75,7 @@
         <button role="menuitem" data-cmd="saveFile"><span>Save a copy of the open file</span><small></small></button>
         <hr>
         <button role="menuitem" data-cmd="script" title="Download or read excel_diagnostics.sh, the script that collects these bundles">Get the collector script</button>
+        <button role="menuitem" data-cmd="cli" title="Download excel_diagnostics_cli.mjs, which searches a bundle from a terminal without a browser">Get the command-line tool</button>
         <hr>
         <button role="menuitem" data-cmd="close">Close bundle</button>
       </div>
@@ -83,9 +91,9 @@
     <span class="spacer"></span>
     <label>Times in
       <select id="tz">
-        <option value="bundle">the Mac's time zone</option>
+        <option value="bundle">the logged Mac's time zone</option>
         <option value="utc">UTC</option>
-        <option value="browser">this computer's time zone</option>
+        <option value="browser">my time zone</option>
       </select>
     </label>
   </header>
@@ -174,7 +182,7 @@
   <form method="dialog" style="text-align:right;margin-top:14px"><button class="primary">Close</button></form>
 </dialog>
 
-<dialog id="scriptDlg" aria-labelledby="scriptTitle">
+<dialog id="scriptDlg" class="getdlg" aria-labelledby="scriptTitle">
   <h2 id="scriptTitle">excel_diagnostics.sh</h2>
   <p>The collector. Run it on the Mac where Excel is slow, hanging or crashing. It gathers Excel's logs, crash and hang reports and the macOS log into an <code>Excel_Diagnostics_….zip</code> on the Desktop, which is what this page reads.</p>
   <p>In Terminal, with the script saved to Downloads:</p>
@@ -192,7 +200,39 @@
   <p class="dim fine">This copy is part of the page, so it downloads without a connection.</p>
 </dialog>
 
+<dialog id="cliDlg" class="getdlg" aria-labelledby="cliTitle">
+  <h2 id="cliTitle">excel_diagnostics_cli.mjs</h2>
+  <p>The command-line tool. It searches a bundle from a terminal with the same engine as this page, for working without a browser or for handing the job to an agent. Every command prints what it searched, what it found and a list of commands that follow on. It reports what the logs hold and leaves the conclusions to the reader. Nothing is uploaded.</p>
+  <p>It is one file and needs Node 20 or later, or Deno 2. With it downloaded:</p>
+  <pre class="cmd">node excel_diagnostics_cli.mjs ~/Desktop/Excel_Diagnostics_collect_20260310_091500.zip
+node excel_diagnostics_cli.mjs help</pre>
+  <p class="dim">The first line says what that bundle holds and where to start; put your own zip or unzipped folder in its place, or the word <code>sample</code> for made-up data. With Deno, write <code>deno run -A</code> in place of <code>node</code>.</p>
+  <table>
+    <tr><td><code>summary</code></td><td>What the bundle holds and where to start. Runs when no command is given.</td></tr>
+    <tr><td><code>search WORDS</code></td><td>The entries that match, oldest first. Takes the same search syntax as this page, plus <code>--from</code>, <code>--to</code>, <code>--around</code> and <code>--min-severity</code>.</td></tr>
+    <tr><td><code>count</code>, <code>histogram</code></td><td>How many entries match per process, tag, source or severity, and when they were logged.</td></tr>
+    <tr><td><code>show ID</code>, <code>context ID</code></td><td>One entry in full, and everything every source logged around it.</td></tr>
+    <tr><td><code>reports</code>, <code>memory</code></td><td>The crash, hang and jetsam reports, and the memory figures the bundle recorded.</td></tr>
+    <tr><td><code>files</code>, <code>cat PATH</code></td><td>The files in the bundle, and the text of one.</td></tr>
+    <tr><td><code>export --out FILE</code></td><td>Every matching entry as a tab-separated file.</td></tr>
+    <tr><td><code>help examples</code></td><td>Step-by-step commands for common jobs, such as seeing what led up to a crash report.</td></tr>
+  </table>
+  <p>To fetch it from a terminal instead of this page:</p>
+  <pre class="cmd" id="cliCurl">curl -O https://cadengithubb.github.io/Excel_Diagnostics/excel_diagnostics_cli.mjs</pre>
+  <div class="scriptacts">
+    <button class="primary" id="cliSave">Download</button>
+    <button id="cliCopy">Copy the curl command</button>
+    <a href="https://github.com/CadenGithubB/Excel_Diagnostics/blob/main/excel_diagnostics_cli.mjs" target="_blank" rel="noopener noreferrer">Source on GitHub ↗</a>
+    <span class="spacer"></span>
+    <span class="dim" id="cliMeta"></span>
+    <button id="cliClose">Close</button>
+  </div>
+  <p class="dim fine">The copy this page hands out is built into the page, so the Download button works without a connection.</p>
+</dialog>
+
 <script id="collector-src" type="text/plain">/*COLLECTOR*/</script>
+<script id="cli-head-src" type="text/plain">/*CLIHEAD*/</script>
+<script id="cli-src" type="text/plain">/*CLI*/</script>
 <script id="core-src" type="text/plain">
 /*CORE*/
 </script>

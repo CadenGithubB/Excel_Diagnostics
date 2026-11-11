@@ -465,8 +465,9 @@ const Core = (() => {
     localToUtc(t) { return t - this.zoneAt(t - this.zoneAt(t) * 60000) * 60000; }
 
     async load(inputs, progress) {
-      // inputs: [{path, blob}] - one zip, or the files of an unzipped bundle, or loose log files
-      const zips = inputs.filter((f) => /\.zip$/i.test(f.path));
+      // inputs: [{path, blob}] - one zip, or the files of an unzipped bundle, or loose log files.
+      // loose: true marks a zip that is known to be one of a bundle's own files, to be listed and not opened.
+      const zips = inputs.filter((f) => !f.loose && /\.zip$/i.test(f.path));
       if (zips.length > 1) throw new Error('Open one bundle at a time (several .zip files were given).');
       let name;
       if (zips.length === 1) {
@@ -725,8 +726,38 @@ const Core = (() => {
     }
 
     // ----- search -----
+    // notes: sentences about the search text itself, for the page to show. A soft note only matters when nothing matched
+    // (the text may be exactly what was meant); the others are always worth saying.
     compile(text, cs) {
-      const out = { text: [], fields: [], hl: [], err: null };
+      const out = { text: [], fields: [], hl: [], err: null, tokens: [], notes: [] };
+      const FIELDS_SAID = 'process:, level:, pid:, subsystem:, category:, tag: and source:';
+      const near = (word) => {                            // the field name a misspelling is closest to, if any
+        let best = null, bestD = 3;
+        for (const name of ['process', 'level', 'severity', 'pid', 'subsystem', 'category', 'tag', 'source', 'file']) {
+          if (Math.abs(name.length - word.length) > 2) continue;
+          const row = Array.from({ length: name.length + 1 }, (_, i) => i);
+          for (let i = 1; i <= word.length; i++) {
+            let prev = row[0]; row[0] = i;
+            for (let j = 1; j <= name.length; j++) { const keep = row[j]; row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (word[i - 1] === name[j - 1] ? 0 : 1)); prev = keep; }
+          }
+          if (row[name.length] < bestD) { bestD = row[name.length]; best = name; }
+        }
+        return word.length >= 3 && bestD <= (word.length < 6 ? 1 : 2) ? best : null;
+      };
+      const plain = (word) => {                           // a bare word that looks like something else was meant
+        const w = word.replace(/^-/, '');
+        let m2;
+        if (/^(level|lvl|sev|severity|process|proc|pid|subsystem|sub|area|category|cat|tag|source|src|file):$/i.test(w)) {
+          out.notes.push({ text: `"${w}" has nothing after the colon, so it was searched for as plain text. Write the value straight after it with no space, for example ${w.toLowerCase()}${w.toLowerCase() === 'pid:' ? '4121' : 'excel'}.` });
+        } else if ((m2 = /^([a-z_]+):(.+)$/i.exec(w))) {
+          const guess = near(m2[1].toLowerCase());
+          out.notes.push({ soft: !guess, text: `"${m2[1]}:" is not a field, so "${w}" was searched for as plain text. ${guess ? `Did you mean ${guess}:${m2[2]}? ` : ''}The fields are ${FIELDS_SAID}` });
+        } else if (w[0] === '"' && w.length > 1) {
+          out.notes.push({ text: `The quotation mark in ${w} is never closed, so each word was searched for on its own, quotation mark included. Close the phrase: "like this".` });
+        } else if (w[0] === '/' && w.length > 1 && w.indexOf('/', 1) < 0) {
+          out.notes.push({ soft: true, text: `${w} was searched for as plain text. A regular expression needs a closing slash: ${w}/` });
+        }
+      };
       const FIELD = { level: 'level', lvl: 'level', sev: 'level', severity: 'level', process: 'process', proc: 'process', pid: 'pid',
         subsystem: 'subsystem', sub: 'subsystem', area: 'subsystem', category: 'category', cat: 'category', tag: 'tag', source: 'source', src: 'source', file: 'source' };
       const tok = /(-?)(?:(level|lvl|sev|severity|process|proc|pid|subsystem|sub|area|category|cat|tag|source|src|file):)?(?:"((?:[^"\\]|\\.)*)"|\/((?:[^\/\\]|\\.)+)\/(i?)(?=\s|$)|(\S+))/gi;
@@ -734,14 +765,19 @@ const Core = (() => {
       while ((m = tok.exec(text)) !== null) {
         const neg = m[1] === '-', field = m[2] && FIELD[m[2].toLowerCase()];
         const lit = m[3] !== undefined ? m[3].replace(/\\(.)/g, '$1') : m[6];
-        if (field) { out.fields.push({ neg, field, value: (lit !== undefined ? lit : m[4] || '').toLowerCase() }); continue; }
+        out.tokens.push(m[0]);
+        if (field) { out.fields.push({ neg, field, value: (lit !== undefined ? lit : m[4] || '').toLowerCase(), said: m[0] }); continue; }
         if (lit === '' || (lit === undefined && m[4] === undefined)) continue;
+        if (m[6] !== undefined) plain(m[0]);
         const src = m[4] !== undefined ? m[4] : escapeRx(lit);
         const flags = 'm' + (cs && !m[5] ? '' : 'i');
         try {
           out.text.push({ neg, re: new RegExp(toLatin(src), 'g' + flags), one: new RegExp(toLatin(src), flags) });
           if (!neg) out.hl.push({ src, flags: flags.replace('m', '') });
-        } catch (err) { out.err = `Invalid regular expression /${src}/ - ${err.message}`; }
+        } catch (err) {
+          out.err = `Invalid regular expression /${src}/ - ${err.message}`;
+          out.notes.push({ text: `/${src}/ is not a valid regular expression (${String(err.message).replace(/^Invalid regular expression: \/.*\/[a-z]*: /, '')}), so it was left out of the search. To search for those characters as plain text, put them in quotation marks.` });
+        }
       }
       return out;
     }
@@ -781,8 +817,10 @@ const Core = (() => {
       return bm;
     }
 
+    // q.dry: only count what would match, leaving the current view and the search cache as they are. The page uses it
+    // to say what each condition is holding back when nothing matches.
     async query(q, progress) {
-      const run = ++this.run, started = Date.now();
+      const run = q.dry ? this.run : ++this.run, started = Date.now();
       const G = this.g, N = G.n, S = this.sources, D = this.dict;
       const c = this.compile(q.text || '', !!q.cs);
       const i0 = q.t0 != null ? lowerBound(G.T, q.t0, 0, N) : 0;
@@ -812,6 +850,18 @@ const Core = (() => {
         else if (t.field === 'subsystem') preds.push({ col: G.S, table: table(D.sub.names), keep });
         else if (t.field === 'category') preds.push({ col: G.C, table: table(D.cat.names), keep });
         else if (t.field === 'source') preds.push({ col: G.F, file: true, table: Uint8Array.from(S, (s) => (`${s.path}\n${s.parser.group}\n${s.parser.short}`.toLowerCase().includes(v) ? 1 : 0)), keep });
+        // a field whose value names nothing in this bundle can only give no entries (or, negated, hide none): say so
+        const p = preds[preds.length - 1], effect = t.neg ? 'it hides nothing' : 'it matches no entries';
+        const list = (names) => names.filter(Boolean).slice(0, 24).join(', ');
+        const like = (names) => { const hit = names.filter((nm) => nm && v.length >= 3 && nm.toLowerCase().includes(v.slice(0, 3))).slice(0, 8); return hit.length ? `Names here that are close: ${hit.join(', ')}.` : ''; };
+        if (t.field === 'pid') { if (p.eq !== p.eq) c.notes.push({ text: `${t.said}: pid: needs a number, for example pid:4121, so ${effect}.` }); }
+        else if (t.field === 'tag') { if (!p.mask) c.notes.push({ text: `${t.said}: no tag in this bundle contains "${v}", so ${effect}. The tags here are ${list(this.tagNames)}.` }); }
+        else if (!p.table.some((x) => x)) {
+          const where = { level: `The levels here are ${list([...new Set(SEV.concat(D.lvl.names))])}. level: matches from the start of the name.`,
+            process: like(D.proc.names), subsystem: like(D.sub.names), category: like(D.cat.names), source: `The sources here are ${list(this.groups)}; source: also matches file paths.` }[t.field];
+          // field: lets the page or the command line add where its own list of these names is
+          c.notes.push({ field: t.field, text: `${t.said}: no ${t.field} in this bundle ${t.field === 'level' ? 'starts with' : 'contains'} "${v}", so ${effect}.${where ? ' ' + where.trim() : ''}` });
+        }
       }
 
       // text terms: scan only files the other filters leave in play, and only the rows inside the time window
@@ -828,8 +878,9 @@ const Core = (() => {
         const lo = new Float64Array(S.length).fill(Infinity), hi = new Float64Array(S.length).fill(-1);
         for (let i = i0; i < i1; i++) { const f = G.F[i], r = G.R[i]; if (r < lo[f]) lo[f] = r; if (r > hi[f]) hi[f] = r; }
         const key = JSON.stringify(c.text.map((t) => [t.neg, t.re.source, t.re.flags]));
-        if (!this.textCache || this.textCache.key !== key) this.textCache = { key, files: new Map() };
-        const cache = this.textCache.files, jobs = [];
+        let tc = this.textCache;
+        if (!tc || tc.key !== key) { tc = { key, files: new Map() }; if (!q.dry) this.textCache = tc; }
+        const cache = tc.files, jobs = [];
         let total = 0, done = 0;
         for (let f = 0; f < S.length; f++) {
           if (!fileOk[f] || hi[f] < 0) continue;
@@ -840,7 +891,7 @@ const Core = (() => {
           total += S[f].off[b - 1] + S[f].len[b - 1] - S[f].off[a];
         }
         for (const job of jobs) {
-          const bm = await this.scanText(S[job.f], job.a, job.b, c.text, run, (n) => { done += n; progress({ phase: 'Searching', label: S[job.f].path, done, total, search: true }); });
+          const bm = await this.scanText(S[job.f], job.a, job.b, c.text, run, (n) => { done += n; if (!q.dry) progress({ phase: 'Searching', label: S[job.f].path, done, total, search: true }); });
           cache.set(job.f, { bm, lo: job.a, hi: job.b });
         }
         if (run !== this.run) throw new Error('superseded');
@@ -882,6 +933,7 @@ const Core = (() => {
       };
       if (only) for (let k = 0; k < only.length; k++) test(only[k]);
       else for (let i = i0; i < i1; i++) test(i);
+      if (q.dry) return { count: n };
       this.view = view.subarray(0, n);
 
       const facets = {};
@@ -896,7 +948,7 @@ const Core = (() => {
         const unknown = (v) => skipped && a.f.col === G.F && skipped.some((sk, f) => sk && (a.f.table ? a.f.table[f] : f) === v);
         facets[name] = { values: ids.map((v) => [v, unknown(v) ? -1 : a.counts[v]]), all };
       }
-      const res = { count: n, total: N, hist: { t0: h0, t1: h1, nb, bins: Array.from(hist) }, facets, hl: c.hl, err: c.err, ms: Date.now() - started };
+      const res = { count: n, total: N, hist: { t0: h0, t1: h1, nb, bins: Array.from(hist) }, facets, hl: c.hl, err: c.err, notes: c.notes, tokens: c.tokens, ms: Date.now() - started };
       if (q.anchor != null) { res.anchorIndex = Math.min(Math.max(0, n - 1), lowerBound(this.view, q.anchor, 0, n)); res.anchorExact = n > 0 && this.view[res.anchorIndex] === q.anchor; }
       return res;
     }
@@ -1081,7 +1133,7 @@ const Core = (() => {
     return files;
   }
 
-  return { Dataset, sampleBundle, SEV, stamp, isoAt, offStr };
+  return { Dataset, sampleBundle, SEV, stamp, isoAt, offStr, readZip, Entry };
 })();
 
 // ---------- worker entry point ----------

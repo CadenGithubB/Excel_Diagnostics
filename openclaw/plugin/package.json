@@ -1,0 +1,8 @@
+{
+  "name": "openclaw-plugin-excel-diagnostics",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "OpenClaw plugin: read-only tools for searching Excel diagnostics log bundles.",
+  "openclaw": { "extensions": ["./index.js"] }
+}

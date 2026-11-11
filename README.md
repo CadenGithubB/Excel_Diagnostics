@@ -1,13 +1,17 @@
 # Excel diagnostics
 
-Two pieces for chasing Microsoft Excel slowdowns, hangs and crashes on macOS:
+Four pieces for chasing Microsoft Excel slowdowns, hangs and crashes on macOS:
 
 - **`excel_diagnostics.sh`** collects the evidence on the affected Mac and zips it. Run `sudo bash excel_diagnostics.sh`; it asks what to do. `bash excel_diagnostics.sh --help` lists the modes and options.
 - **`index.html`** is a viewer for those bundles. It is a single static page, served by GitHub Pages, that searches and filters a bundle inside the browser.
+- **`excel_diagnostics_cli.mjs`** searches a bundle from a terminal with the same engine as the page, for working without a browser or for handing the job to an agent.
+- **`openclaw/`** is a plugin and skill for an OpenClaw agent: ten read-only `excel_diag_*` tools over the same engine, with a short skill that tells the agent when and how to use them.
 
 ## Using the viewer
 
 Open the page, then drop an `Excel_Diagnostics_….zip` on it. The unzipped folder or individual log files work too, and "Try it with sample data" loads a made-up bundle.
+
+Prefer a terminal? File → Get the command-line tool (or "Download the tool" on the start page) hands out `excel_diagnostics_cli.mjs`, described below.
 
 No bundle yet? The page hands out the collector as well: "Download the script" on the start page, or File → Get the collector script once a bundle is open. "View it" shows the script and how to run it. The copy is built into the page, so it works offline and matches this repository as of the last build.
 
@@ -27,7 +31,7 @@ Every timestamped source is merged into one list, sorted by time:
 | Crash and hang reports | one entry per `.ips`, `.crash`, `.diag`, `.hang`, `.spin` or `.panic` file, and each recorded force-quit |
 | Anything else | any `.log` or `.txt` whose lines start with a timestamp |
 
-Sources disagree about clocks: Excel and OneDrive log in UTC, AutoUpdate in local time without saying so, the unified log in local time with an offset. The viewer converts everything to UTC and displays it in the Mac's own time zone, which it learns from the offsets in the unified log. A switch in the header changes the display to UTC or to your own zone.
+Sources disagree about clocks: Excel and OneDrive log in UTC, AutoUpdate in local time without saying so, the unified log in local time with an offset. The viewer converts everything to UTC and displays it in the time zone of the Mac the bundle was collected on (the "logged Mac"), which it learns from the offsets in the unified log. A switch in the header changes the display to UTC or to your own zone, and shows the offset each choice means. If the logs record no zone, that first choice is unavailable and times start in your own zone.
 
 They disagree about names too: Excel's own log calls the process `EXCEL`, macOS calls it `Microsoft Excel`. The viewer shows both as `Microsoft Excel`, so one process filter covers both logs; the Source column still says which log an entry came from.
 
@@ -73,6 +77,62 @@ macOS `ditto`, which the collector uses, does not write zip64. Past 4 GB it stor
 
 It needs a current browser: Chrome or Edge 103, Safari 16.4, Firefox 113, or later.
 
+## Using the command-line tool
+
+`excel_diagnostics_cli.mjs` is one file with no dependencies. It needs Node 20 or later, or Deno 2 (`deno run -A` in place of `node`). Get it from this repository, from File → Get the command-line tool in the viewer, or with:
+
+```bash
+curl -O https://cadengithubb.github.io/Excel_Diagnostics/excel_diagnostics_cli.mjs
+```
+
+Give it a bundle (the zip, the unzipped folder or a single log file) and a command:
+
+```bash
+node excel_diagnostics_cli.mjs ~/Desktop/Excel_Diagnostics_collect_20260310_091500.zip
+```
+
+With no command it prints what the bundle holds and where to start. The word `sample` in place of a bundle opens made-up data.
+
+| Command | What it prints |
+| --- | --- |
+| `summary` | What the bundle holds: entries, period, counts by severity, tag and process, each log source, the reports |
+| `search WORDS` | The entries that match, oldest first, each with an ID |
+| `count`, `histogram` | How many entries match per severity, source, tag or process, and when they were logged |
+| `show ID`, `context ID` | One entry in full, and everything every source logged around it |
+| `reports`, `memory` | The crash, hang and jetsam report files, and the memory files and figures |
+| `files`, `cat PATH` | The files in the bundle, and the text of one |
+| `export --out FILE` | Every matching entry as a tab-separated file |
+| `help`, `help search`, `help time`, `help examples` | The commands, the search syntax, how times are read, and step-by-step commands for common jobs |
+
+`WORDS` is the viewer's search syntax: words, `"phrases"`, `/regular expressions/`, `-exclusions` and fields such as `process:excel` or `tag:memory`. `--from`, `--to`, `--around` and `--min-severity` narrow it further.
+
+It is written to be usable by an agent with no other instructions:
+
+- Every command repeats the search as it understood it, says how many entries matched, and ends with a "Next:" list of commands that follow on, ready to copy.
+- When nothing matches, it counts again with each condition taken away in turn, so it is clear which one is responsible.
+- A mistyped command, option, field or time gets an answer that names the mistake and shows the right form.
+- It reports what the logs hold and draws no conclusions.
+
+A zip is unpacked once into the system's temporary folder so that later commands start quickly; `clean` deletes those folders. A folder is read where it is. Nothing is uploaded, and the only file it writes is the one named with `export --out`.
+
+For programs there is `excel_diagnostics_cli.mjs request`: one JSON request on standard input, one JSON document on standard output. The OpenClaw plugin in [`openclaw/`](openclaw/README.md) drives the tool that way.
+
+Each command is a new process that indexes the bundle again: about a second for a 240 MB bundle of 430,000 entries on an M1 Pro MacBook Pro. Tested with Node 24 and Deno 2.7.
+
+## Using it from an OpenClaw agent
+
+[`openclaw/`](openclaw/README.md) holds a plugin that gives an OpenClaw agent ten tools (`excel_diag_summary`, `excel_diag_search`, `excel_diag_show`, `excel_diag_context` and six more) and a skill, [`openclaw/SKILL.md`](openclaw/SKILL.md), that the agent reads before using them. The plugin does no log work itself: for each call it starts `excel_diagnostics_cli.mjs request` and lays the answer out for a small local model, with what was understood first, the log lines as plain text, and the calls that could follow last.
+
+Bundles are copied into one folder on the machine that runs OpenClaw, and the agent names them by id; it never sees a path on that machine. The tools report what the logs record and draw no conclusions.
+
+[`openclaw/INSTALL.md`](openclaw/INSTALL.md) covers installing it. `bash openclaw/plugin/deploy.sh --check` is the first step and changes nothing. The tests need no OpenClaw:
+
+```bash
+node openclaw/tests/run.mjs
+```
+
+They load the real plugin against a stand-in host and run the real command-line tool. They pass on Node 24 and Deno 2.7. Nothing in this folder has been run inside a live OpenClaw Gateway yet.
+
 ## Working on the viewer
 
 The page is assembled from `src/` by a small script. There are no dependencies.
@@ -81,7 +141,7 @@ The page is assembled from `src/` by a small script. There are no dependencies.
 python3 build.py
 ```
 
-Rebuild after changing `excel_diagnostics.sh` too: the page carries a copy of it for the download button. `python3 build.py --check` fails if `index.html` is out of date.
+The same command writes `excel_diagnostics_cli.mjs`, which is `src/core.js` followed by `src/cli.js`, `src/request.js` and `src/cli_main.js`. Rebuild after changing `excel_diagnostics.sh` too: the page carries a copy of it, and of the command-line tool, for the download buttons. `python3 build.py --check` fails if `index.html` or `excel_diagnostics_cli.mjs` is out of date.
 
 `src/core.js` does the indexing and searching in a Web Worker and can be run outside a browser. This loads a bundle with Deno and prints what was indexed, plus the results of a few searches:
 

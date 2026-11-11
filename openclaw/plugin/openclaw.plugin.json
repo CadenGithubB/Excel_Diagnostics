@@ -1,0 +1,16 @@
+{
+  "id": "excel-diagnostics",
+  "name": "Excel Diagnostics",
+  "description": "Read-only search of Excel diagnostics log bundles kept in a folder on the host.",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "bundlesDir": { "type": "string", "description": "Absolute path of the folder that holds the bundles (zips or unzipped folders). Default: <OpenClaw state folder>/excel-diagnostics/bundles. Takes effect on gateway restart." },
+      "timeoutSeconds": { "type": "integer", "minimum": 5, "maximum": 600, "description": "Longest one tool call may take. Default 120. Takes effect on gateway restart." }
+    }
+  },
+  "activation": { "onStartup": true },
+  "contracts": { "tools": ["excel_diag_summary", "excel_diag_search", "excel_diag_count", "excel_diag_histogram", "excel_diag_show", "excel_diag_context", "excel_diag_reports", "excel_diag_files", "excel_diag_read_file", "excel_diag_memory"] }
+}

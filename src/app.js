@@ -64,6 +64,25 @@
     const om = offsetAt(t), a = Math.abs(om);
     return om === 0 && tzMode === 'utc' ? 'UTC' : `UTC${om < 0 ? '-' : '+'}${z2((a / 60) | 0)}:${z2(a % 60)}`;
   }
+  const fmtOff = (om) => { const a = Math.abs(om); return `UTC${om < 0 ? '-' : '+'}${z2((a / 60) | 0)}:${z2(a % 60)}`; };
+  let tzFell = false;                                   // the logs gave no zone, so "bundle" fell back to "browser"
+  function tzOptions() {                                // name each choice by whose clock it is, with the offset it means for this bundle
+    const sel = $('#tz'), has = info.zone.length > 0;
+    const span = [info.t0, info.t1].filter((t) => t === t);
+    if (!span.length) span.push(Date.now());
+    const mine = [...new Set(span.map((t) => -new Date(t).getTimezoneOffset()))].map(fmtOff).join(' and ');
+    const theirs = [...new Set(info.zone.map((z) => z[1]))].map(fmtOff).join(' and ');
+    const o = sel.options;
+    o[0].textContent = has ? `the logged Mac's time zone (${theirs})` : "the logged Mac's time zone (not in these logs)";
+    o[0].disabled = !has;
+    o[2].textContent = `my time zone (${mine})`;
+    if (!has && tzMode === 'bundle') { tzMode = 'browser'; tzFell = true; }
+    else if (has && tzFell) { tzMode = 'bundle'; tzFell = false; }
+    sel.value = tzMode;
+    sel.title = has
+      ? 'How times are displayed. The logged Mac is the one the bundle was collected on; its zone is read from its macOS log.'
+      : "How times are displayed. These logs do not record the logged Mac's time zone, so times are in yours or in UTC.";
+  }
   function parseTime(str) {                             // "YYYY-MM-DD HH:MM[:SS]" in the display zone -> UTC ms
     const m = /^\s*(\d{4})-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,3}))?)?)?\s*$/.exec(str);
     if (!m) return NaN;
@@ -116,6 +135,8 @@
   function init() {
     Object.assign(S, { text: '', cs: false, facets: {}, t0: info.focus ? info.focus[0] : null, t1: info.focus ? info.focus[1] : null, pinnedOnly: false });
     pins.clear(); selPos = null; selIndex = -1; topRow = 0;
+    pages.clear(); view.count = 0;                      // rows from the bundle before this one must not be drawn with this one's names
+    tzOptions();
     $('#q').value = ''; $('#caseSens').checked = false;
     $('#bundleName').textContent = info.name;
     document.title = `${info.name} - Excel diagnostics viewer`;
@@ -642,7 +663,7 @@
     for (const n of info.notes) html += `<p class="note">${esc(n)}</p>`;
     html += `<h2>Sources on the timeline</h2><div class="tbl"><table><thead><tr><th>Source</th><th>File</th><th class="num">Entries</th><th>First entry</th><th>Last entry</th><th class="num">Size</th></tr></thead><tbody>` +
       src.map((s) => `<tr><td>${esc(s.group)}</td><td><a data-src="${s.id}" title="Show only this file on the timeline">${esc(s.path)}</a></td><td class="num">${fmtN(s.rows)}</td><td>${fmtTime(s.t0, false)}</td><td>${fmtTime(s.t1, false)}</td><td class="num">${fmtBytes(s.size)}</td></tr>`).join('') +
-      `</tbody></table></div><p class="dim">Times are shown in ${tzMode === 'utc' ? 'UTC' : tzMode === 'bundle' ? "the Mac's own time zone" : "this computer's time zone"}.</p><div id="docs"></div>`;
+      `</tbody></table></div><p class="dim">Times are shown in ${tzMode === 'utc' ? 'UTC' : tzMode === 'bundle' ? "the logged Mac's time zone" : 'your time zone'}.</p><div id="docs"></div>`;
     el.innerHTML = html;
     const docs = [['summary.md', 'Collector summary', true], ['case/incident_context.md', 'Incident context', true], ['reports/crash_summary.txt', 'Crash and hang report summary', true],
       ['unified_logs/collection_status.txt', 'Unified log collection status', true], ['office/versions.txt', 'Office versions', false], ['system/system_info.txt', 'System information', false], ['collection.log', 'Collection log', false]];
@@ -1003,7 +1024,7 @@
       f.inc = [...new Set(f.inc.concat(ids(old.show)))]; f.exc = [...new Set(f.exc.concat(ids(old.hide)))];
     }
     S.t0 = typeof v.from === 'number' ? v.from : null; S.t1 = typeof v.to === 'number' ? v.to : null;
-    if (['bundle', 'utc', 'browser'].includes(v.timeZone)) { tzMode = v.timeZone; $('#tz').value = tzMode; renderOverview(); }
+    if (['bundle', 'utc', 'browser'].includes(v.timeZone)) { tzMode = v.timeZone; tzFell = false; tzOptions(); renderOverview(); }
     pins.clear();
     if (same && Array.isArray(v.pins)) for (const p of v.pins) if (Number.isInteger(p) && p >= 0 && p < info.total) pins.set(p, true);
     S.pinnedOnly = !!v.pinnedOnly && pins.size > 0;
@@ -1069,6 +1090,7 @@
         break;
       }
       case 'script': showScript(); break;
+      case 'cli': showCli(); break;
       case 'close': closeBundle(); break;
     }
   });
@@ -1099,6 +1121,23 @@
     (navigator.clipboard ? navigator.clipboard.writeText(scriptSource()) : Promise.reject()).then(() => blip(b, 'Copied'), () => blip(b, 'Blocked'));
   });
   $('#scriptClose').addEventListener('click', () => $('#scriptDlg').close());
+
+  // ---------- the command-line tool: the engine this page already holds, between the tool's own two ends ----------
+  const cliSource = () => $('#cli-head-src').textContent + $('#core-src').textContent.replace(/^\n/, '') + $('#cli-src').textContent;
+  const downloadCli = () => download(new Blob([cliSource()], { type: 'text/javascript' }), 'excel_diagnostics_cli.mjs');
+  function showCli() {
+    const t = cliSource();
+    $('#cliMeta').textContent = `one file, ${Math.round(new Blob([t]).size / 1024)} KB`;
+    $('#cliDlg').showModal();
+  }
+  $('#btnCli').addEventListener('click', () => { downloadCli(); flash('Downloading excel_diagnostics_cli.mjs'); });
+  $('#btnCliView').addEventListener('click', showCli);
+  $('#cliSave').addEventListener('click', (e) => { downloadCli(); blip(e.currentTarget, 'Saved'); });
+  $('#cliCopy').addEventListener('click', (e) => {
+    const b = e.currentTarget;
+    (navigator.clipboard ? navigator.clipboard.writeText($('#cliCurl').textContent) : Promise.reject()).then(() => blip(b, 'Copied'), () => blip(b, 'Blocked'));
+  });
+  $('#cliClose').addEventListener('click', () => $('#cliDlg').close());
   $('#help').addEventListener('click', () => $('#helpDlg').showModal());
   $('#facets').addEventListener('click', (e) => {
     const fv = e.target.closest('.fv');
@@ -1122,7 +1161,7 @@
     const t0 = S.t0 != null ? S.t0 : info.t0, t1 = S.t1 != null ? S.t1 : info.t1, half = (t1 - t0) / 2;
     setRange(t0 - half, t1 + half);
   });
-  $('#tz').addEventListener('change', (e) => { tzMode = e.target.value; requestRender(); if (view.hist) drawHist(); renderRange(); renderOverview(); if (selPos != null && !$('#detail').hidden) showDetail(selPos); if (currentTab() === 'memory') drawMemory(); });
+  $('#tz').addEventListener('change', (e) => { tzMode = e.target.value; tzFell = false; requestRender(); if (view.hist) drawHist(); renderRange(); renderOverview(); if (selPos != null && !$('#detail').hidden) showDetail(selPos); if (currentTab() === 'memory') drawMemory(); });
   document.querySelector('.tabs').addEventListener('click', (e) => { if (e.target.dataset.tab) showTab(e.target.dataset.tab); });
   $('#tree').addEventListener('click', (e) => { const a = e.target.closest('a'); if (a) openFile(+a.dataset.i); });
   $('#treeFilter').addEventListener('input', (e) => buildTree(e.target.value));
