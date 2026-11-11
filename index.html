@@ -99,7 +99,7 @@ body.drag .dropzone, body.drag #app { outline: 3px solid var(--accent); outline-
 .histhead i, #histTip i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 .histhead input { width: 150px; font-family: var(--mono); font-size: 11.5px; padding: 2px 6px; }
 .histhead button { padding: 1px 8px; font-size: 12px; }
-#hist { height: 92px; cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
+#hist { height: 140px; cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
 #hist svg, .chart svg { display: block; }
 .bo, i.bo { fill: var(--other); background: var(--other); }
 .bw, i.bw { fill: var(--warning); background: var(--warning); }
@@ -133,13 +133,15 @@ body.drag .dropzone, body.drag #app { outline: 3px solid var(--accent); outline-
 .fv.inc .lbl::before { content: "✓ "; color: var(--accent); }
 .fv.exc .lbl { text-decoration: line-through; color: var(--muted); }
 .fv.exc .x { color: var(--critical); }
+.fv.sub { padding-left: 34px; }
+.fv.sub .lbl { color: var(--ink2); }
 .more { color: var(--muted); padding: 4px 14px; font-size: 12px; }
 .fv i, .sv i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; border: 1.5px solid var(--axis); }
 .s5 i, .s4 i { background: var(--critical); border-color: var(--critical); }
 .s3 i { background: var(--warning); border-color: var(--warning); }
 
 .tablewrap { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
-.thead, .r { display: grid; grid-template-columns: 184px 78px 92px 200px minmax(0, 1fr); }
+.thead, .r { display: grid; grid-template-columns: 192px 116px 106px 240px minmax(0, 1fr); }
 .thead { font-size: 11.5px; color: var(--ink2); border-bottom: 1px solid var(--hair); background: var(--surface); padding-right: 14px; }
 .thead span { padding: 3px 8px; overflow: hidden; white-space: nowrap; }
 #vs { flex: 1; min-height: 60px; overflow-y: scroll; overflow-x: hidden; position: relative; outline: none; background: var(--surface); }
@@ -240,6 +242,7 @@ dialog td:first-child { white-space: nowrap; padding-right: 18px; }
   #bundleName { display: none; }
   .treewrap { width: 42%; }
   .histhead input { width: 136px; }
+  #hist { height: 96px; }
   .histhead .dim { display: none; }
   #detail { max-height: 62%; }
 }
@@ -302,7 +305,7 @@ dialog td:first-child { white-space: nowrap; padding-right: 18px; }
         <button role="menuitem" data-cmd="exportPins"><span>Export pinned entries</span><small></small></button>
         <button role="menuitem" data-cmd="saveFile"><span>Save a copy of the open file</span><small></small></button>
         <hr>
-        <button role="menuitem" data-cmd="script" title="Download or read excel_diagnostics.sh, the script that collects these bundles">Get the collector script…</button>
+        <button role="menuitem" data-cmd="script" title="Download or read excel_diagnostics.sh, the script that collects these bundles">Get the collector script</button>
         <hr>
         <button role="menuitem" data-cmd="close">Close bundle</button>
       </div>
@@ -349,7 +352,7 @@ dialog td:first-child { white-space: nowrap; padding-right: 18px; }
       <div class="histhead">
         <span><i class="be"></i>Errors and faults</span><span><i class="bw"></i>Warnings</span><span><i class="bo"></i>Everything else</span>
         <span class="spacer"></span>
-        <span class="dim">Drag on the chart to zoom</span>
+        <span class="dim">Drag to zoom in, right-click to zoom out</span>
         <input id="tFrom" type="text" aria-label="Window start" spellcheck="false">
         <span>to</span>
         <input id="tTo" type="text" aria-label="Window end" spellcheck="false">
@@ -396,6 +399,8 @@ dialog td:first-child { white-space: nowrap; padding-right: 18px; }
     <tr><td><code>process:excel</code></td><td>Process name contains "excel". Also <code>level:</code> <code>pid:</code> <code>subsystem:</code> <code>category:</code> <code>tag:</code> <code>source:</code></td></tr>
   </table>
   <p>The list on the left filters by severity, source, tag and process: click a value to show only it, or its − to hide it. The counts beside the other values show what choosing them would give.</p>
+  <p>Under each severity are the levels the logs themselves use. macOS writes Default, Info, Debug, Error and Fault; Excel writes Medium, Monitorable (worth watching, not a failure) and Unexpected (something went wrong). Choosing a severity chooses all of its levels.</p>
+  <p>On the chart, drag to zoom in to a time span, right-click to zoom out, and click to jump the list to that moment.</p>
   <h2>Keys</h2>
   <table>
     <tr><td><code>/</code></td><td>Go to the search box</td></tr>
@@ -665,34 +670,54 @@ printf 'component\tstatus\tdetails\n' > "$MANIFEST"
 
 # Everything Excel and its bundled helpers log; any process's message that names Excel (launchd exit
 # reasons, sandbox and privacy denials, RunningBoard, WindowServer, file providers); Microsoft crash
-# reporting and updates; why the Mac last shut down, logged at each startup; and system memory pressure. RunningBoard's whole-system state dumps are left
+# reporting and updates; why the Mac last shut down, logged at each startup; system memory pressure; and
+# any process failing a write because the disk is full. RunningBoard's whole-system state dumps are left
 # out: they name every running app and were a third of a day's output.
 PRED_ALL='process == "'"$EXCEL_PROC"'"
  OR processImagePath CONTAINS "/'"$EXCEL_PROC"'.app/"
  OR (eventMessage CONTAINS[c] "'"$EXCEL_NAME"'" AND NOT (process == "runningboardd" AND eventType == stateEvent))
  OR process IN {"spindump", "Microsoft Error Reporting", "Microsoft AutoUpdate", "Microsoft Update Assistant"}
  OR eventMessage CONTAINS[c] "previous shutdown cause"
+ OR eventMessage CONTAINS[c] "No space left on device"
  OR ((process == "ReportCrash" OR process == "osanalyticshelper") AND eventMessage CONTAINS[c] "jetsam")
  OR (process == "kernel" AND (eventMessage CONTAINS[c] "memorystatus" OR eventMessage CONTAINS[c] "jetsam" OR eventMessage CONTAINS[c] "compressor" OR eventMessage CONTAINS[c] "swap"))'
 
 # Unified-log entries are written one per row, tab-separated, with these columns. tags says why an
 # entry is relevant, mirroring PRED_ALL; line breaks and tabs inside a message appear as \n and \t.
+#
+# Two tags describe what a message says instead of who logged it. permissions: sandbox and privacy (TCC)
+# refusals, missing entitlements, "not permitted", "denied". storage: a full disk, an exceeded quota, I/O
+# errors, a read-only volume. Both look for refusals and failures, not the bare words, which are mostly
+# noise ("storage" is cookie stores and telemetry names). The viewer applies the same two patterns to
+# every log in a bundle, so keep them in step with CONTENT_TAGS in src/core.js.
+TAG_PERMISSIONS_RX='kTCCService|\bdeny\(|denied\b|\bforbidden\b|not permitted|not authori[sz]ed|unauthori[sz]ed|(unsatisfied|missing|requires|have|without) entitlement|\bEPERM\b|\bEACCES\b|NSCocoaErrorDomain Code=(257|513)\b'
+TAG_STORAGE_RX='no space left|\bENOSPC\b|(disk|volume|device) (is |was )?(almost |nearly )?full|\b(out of|low on|not enough|insufficient|low) (disk |free |storage )?space|quota exceeded|input/output error|\bI/O error|read-only file ?system|NSCocoaErrorDomain Code=(640|642)\b|NSPOSIXErrorDomain Code=(5|28|30|69)\b|0x800[37]0070\b'
 LABEL_HEADER=$'local_time\tutc_time\tlevel\tprocess\tpid\tsender\tsubsystem\tcategory\ttags\tmessage'
+# jq compiles a regex every time it is used, which tripled labeling time when both patterns ran on every
+# entry. A plain substring check picks the few entries worth testing first, so every alternative in the
+# patterns above needs a (lowercase) piece in the matching list below.
 LABEL_JQ='def basename: split("/") | last;
+def has_any($pieces): . as $s | any($pieces[]; . as $w | $s | contains($w));
 def utc: (capture("^(?<t>[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>[.][0-9]+)?(?<s>[+-])(?<h>[0-9]{2})(?<m>[0-9]{2})$")
     | ((.t | strptime("%Y-%m-%d %H:%M:%S") | mktime) - (if .s == "-" then -1 else 1 end) * ((.h | tonumber) * 3600 + (.m | tonumber) * 60))
         as $e | ($e | strftime("%Y-%m-%d %H:%M:%S")) + (.f // "")) // "";
 fromjson? | select(type == "object" and has("timestamp"))    # log show ends with a {"count":...} summary
 | (.processImagePath // "" | basename) as $p
 | (.eventMessage // "") as $m
+| ($m | ascii_downcase) as $l
 | [ if $p == $proc then "excel" else empty end,
     if $p != $proc and (.processImagePath // "" | contains("/" + $proc + ".app/")) then "excel-helper" else empty end,
     if $p == "Microsoft Error Reporting" or $p == "Microsoft AutoUpdate" or $p == "Microsoft Update Assistant" then "microsoft" else empty end,
     if $p == "spindump" then "hang-report" else empty end,
-    if $p != $proc and ($m | ascii_downcase | contains($name | ascii_downcase)) then "mentions-excel" else empty end,
+    if $p != $proc and ($l | contains($name | ascii_downcase)) then "mentions-excel" else empty end,
     if ($p == "kernel" and ($m | test("memorystatus|jetsam|compressor|swap"; "i")))
        or (($p == "ReportCrash" or $p == "osanalyticshelper") and ($m | test("jetsam"; "i"))) then "memory" else empty end,
-    if ($m | ascii_downcase | contains("previous shutdown cause")) then "restart" else empty end,
+    if ($l | contains("previous shutdown cause")) then "restart" else empty end,
+    if $p == "tccd" or .subsystem == "com.apple.TCC"
+       or (($l | has_any(["ktccservice", "deny(", "denied", "forbidden", "permitted", "authori", "entitlement", "eperm", "eacces", "errordomain code="]))
+           and ($m | test($perm; "i"))) then "permissions" else empty end,
+    if ($l | has_any(["space", "enospc", " full", "quota exceeded", "output error", "i/o error", "read-only file", "errordomain code=", "0070"]))
+       and ($m | test($stor; "i")) then "storage" else empty end,
     if .eventType == "lossEvent" then "logs-dropped" else empty end
   ] as $tags
 | [ .timestamp // "", (.timestamp // "" | utc), .messageType // .eventType // "", $p, (.processID // "" | tostring),
@@ -704,6 +729,9 @@ LOG_EXT=tsv
 
 note() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
 record_status() { printf '%s\t%s\t%s\n' "$1" "$2" "${3//$'\t'/ }" >> "$MANIFEST"; }
+# Tells the viewer that the tags column of the .tsv files already carries permissions and storage, so it
+# does not have to work them out again. Without jq the raw JSON lines have no tags and the viewer does it.
+[ "$LOG_EXT" = tsv ] && record_status "unified_log_tags" "complete" "excel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, permissions, storage, logs-dropped"
 
 # run_limited SECONDS CMD... - run CMD, stop it after SECONDS. Returns CMD's status, or 124 on timeout.
 run_limited() {
@@ -729,7 +757,8 @@ run_limited() {
 label_entries() {   # log --style ndjson on stdin -> labeled .tsv rows (or the JSON lines unchanged without jq)
     if [ -n "$JQ" ]; then
         printf '%s\n' "$LABEL_HEADER"
-        "$JQ" --unbuffered -R -r --arg proc "$EXCEL_PROC" --arg name "$EXCEL_NAME" "$LABEL_JQ"
+        "$JQ" --unbuffered -R -r --arg proc "$EXCEL_PROC" --arg name "$EXCEL_NAME" \
+            --arg perm "$TAG_PERMISSIONS_RX" --arg stor "$TAG_STORAGE_RX" "$LABEL_JQ"
     else
         cat
     fi
@@ -972,7 +1001,7 @@ write_source_catalog() {
     catalog_line "System diagnostic reports" "/Library/Logs/DiagnosticReports" "reports/Library_Logs_DiagnosticReports" "Every macOS diagnostic report since the incident start (crashes, hangs, jetsam, shutdown stalls, resets, panics, resource limits), plus Excel-related ones from the last 30 days"
     catalog_line "Force-quit and usage records" "$USER_HOME/Library/Application Support/CrashReporter" "reports/CrashReporter" "Per-app crash and force-quit timestamps"
     local ulabel="Filtered unified logs" ustate="see unified_logs/collection_status.txt" udest="unified_logs/YYYY-MM-DD.$LOG_EXT"
-    local uformat="One entry per row, tab-separated with a header: local_time, utc_time (lines up with Excel's own logs), level (Default/Info/Debug/Error/Fault or event type), process, pid, sender (library that logged it), subsystem, category, tags (excel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, logs-dropped; empty when none apply), message (line breaks as \\n)"
+    local uformat="One entry per row, tab-separated with a header: local_time, utc_time (lines up with Excel's own logs), level (Default/Info/Debug/Error/Fault or event type), process, pid, sender (library that logged it), subsystem, category, tags (excel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, permissions, storage, logs-dropped; empty when none apply), message (line breaks as \\n)"
     if [ "$MODE" = repro ]; then
         ulabel="Live unified-log stream, all processes"; ustate="captured during the reproduction"; udest="repro/unified_live_unfiltered.$LOG_EXT"
     fi
@@ -1360,7 +1389,7 @@ write_summary() {
             echo '## Filtering unified logs'
             echo
             echo 'Unified-log `.tsv` files (`unified_logs/`, `unified_last30m.tsv`, `repro/unified_live_unfiltered.tsv`) have one entry per row and open as columns in Numbers or Excel.'
-            echo 'Filter on `level` (Error, Fault) and `tags`: `excel` (Excel itself), `excel-helper`, `microsoft` (error reporting, AutoUpdate), `hang-report`, `mentions-excel` (another process naming Excel), `memory`, `restart` (why the Mac last shut down), `logs-dropped`.'
+            echo 'Filter on `level` (Error, Fault) and `tags`: `excel` (Excel itself), `excel-helper`, `microsoft` (error reporting, AutoUpdate), `hang-report`, `mentions-excel` (another process naming Excel), `memory`, `restart` (why the Mac last shut down), `permissions` (sandbox and privacy refusals, "not permitted", "denied"), `storage` (full disk, quota, I/O errors), `logs-dropped`.'
             echo 'Use `utc_time` to line entries up with Excel'"'"'s own logs, which are in UTC. From Terminal, for example:'
             echo
             echo '    awk -F'"'"'\t'"'"' '"'"'$3 == "Error" || $3 == "Fault" || $9 ~ /excel/'"'"' unified_logs/*.tsv'
@@ -1675,7 +1704,7 @@ const Core = (() => {
       return m;
     };
     return {
-      kind: 'unified', group: 'macOS unified log', short: 'unified',
+      kind: 'unified', group: 'macOS unified log', short: 'unified', tagged: true,
       line(src, s, p, e, off) {
         const c = s.charCodeAt(p);
         if (c < 48 || c > 57) { if (c !== 0 && !s.startsWith('local_time\t', p)) src.extend(off + e - p); return; }
@@ -1752,6 +1781,7 @@ const Core = (() => {
         let name = fld(s, t1 + 1, t2), pid = 0;
         const k = name.indexOf(' (0x');
         if (k > 0) { pid = parseInt(name.substring(k + 4), 16) | 0; name = name.substring(0, k); }
+        if (name === 'EXCEL') name = 'Microsoft Excel';   // what macOS calls the same process, so one filter covers both logs
         src.push(off, e - p, t, lvl.id(fld(s, t6 + 1, t7)), proc.id(name), pid, sub.id(fld(s, t3 + 1, t4)), cat.id(fld(s, t4 + 1, t5)), 0);
       },
       fields(text) {
@@ -1760,6 +1790,26 @@ const Core = (() => {
       },
     };
   }
+
+  // Tags worked out from what an entry says, in every source, so they also appear in bundles collected before the
+  // collector wrote them. Keep in step with TAG_PERMISSIONS_RX and TAG_STORAGE_RX in excel_diagnostics.sh.
+  // Both look for refusals and failures, not the bare words: "storage" alone is mostly cookie stores and telemetry
+  // names. Entries from tccd (the macOS privacy-permission service) are tagged permissions by process, in indexSource.
+  // A collector that writes these tags itself says so in manifest.tsv, and its unified-log .tsv files are then taken
+  // as they are: those are the files that reach gigabytes, and working the tags out again would double their load time.
+  const CONTENT_TAGS = [
+    ['permissions', /kTCCService|\bdeny\(|denied\b|\bforbidden\b|not permitted|not authori[sz]ed|unauthori[sz]ed|(?:unsatisfied|missing|requires|have|without) entitlement|\bEPERM\b|\bEACCES\b|NSCocoaErrorDomain Code=(?:257|513)\b/i],
+    ['storage', /no space left|\bENOSPC\b|(?:disk|volume|device) (?:is |was )?(?:almost |nearly )?full|\b(?:out of|low on|not enough|insufficient|low) (?:disk |free |storage )?space|quota exceeded|input\/output error|\bI\/O error|read-only file ?system|NSCocoaErrorDomain Code=(?:640|642)\b|NSPOSIXErrorDomain Code=(?:5|28|30|69)\b|0x800[37]0070\b/i],
+  ];
+  // Running those two over every log would triple the time to open a bundle. These find candidates first: a short
+  // piece of each phrase that starts on an uncommon character, so the regex engine can skip ahead quickly, with a
+  // look-behind where the piece alone is common ("space", "full"). Only the few hundred entries they find get the
+  // real test above. They are split in two because one long alternation ran slower than two shorter ones in V8.
+  // Every phrase above needs a piece here; test/core_test.js checks that each one is found.
+  const CONTENT_HINTS = [
+    /y\((?<=\b[dD]eny\()|[dD]enied\b|[pP]ermitted(?<=[nN]ot permitted)|uthori[sz]ed(?<=(?:[nN]ot a|[uU]na)uthori[sz]ed)|ntitlement(?<=(?:[uU]nsatisfied|[mM]issing|[rR]equires|have|[wW]ithout) [eE]ntitlement)|Code=\d+\b(?<=NSCocoaErrorDomain Code=(?:257|513|640|642)|NSPOSIXErrorDomain Code=(?:5|28|30|69))|[fF]ull\b(?<=(?:[dD]isk|[vV]olume|[dD]evice) (?:is |was )?(?:almost |nearly )?full)|[qQ]uota exceeded|put\/output error|-only file ?system/g,
+    /kTCC|bidden\b(?<=\b[fF]orbidden)|(?:PERM|ACCES|NOSPC)\b(?<=\bE(?:PERM|ACCES|NOSPC))|pace\b(?<=(?:[oO]ut of|[lL]ow on|[nN]ot enough|[iI]nsufficient|[lL]ow) (?:disk |free |storage )?space|[nN]o space)|I\/O error|800[37]0070\b/g,
+  ];
 
   const cap1 = (s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
   const RX_KINDS = [
@@ -1883,6 +1933,8 @@ const Core = (() => {
       }
       if (skippedBaseline) notes.push(`${skippedBaseline} log file(s) under repro/baseline are not on the timeline because repro/final holds a later copy of the same file.`);
 
+      const manifest = this.entries.find((en) => en.path === 'manifest.tsv');
+      this.collectorTags = !!manifest && /^unified_log_tags\t[^\n]*\bpermissions\b[^\n]*\bstorage\b/m.test(LATIN1.decode(await manifest.head(16384)));
       this.store = zips.length ? await openStore() : null;
       const total = this.sources.reduce((a, s) => a + s.entry.size, 0);
       let done = 0;
@@ -1908,7 +1960,7 @@ const Core = (() => {
     }
 
     async indexSource(src, onBytes) {
-      const parser = src.parser;
+      const parser = src.parser, D = this.dict;
       let carry = null, base = 0, pend = [], pendLen = 0;
       const flush = (final) => {
         if (carry) { pend.unshift(carry); pendLen += carry.length; carry = null; }
@@ -1917,12 +1969,34 @@ const Core = (() => {
         pend = []; pendLen = 0;
         const s = LATIN1.decode(buf), n = s.length;
         let p = 0;
+        const first = src.n;                              // entries from here on start in this chunk
         for (;;) {
           let e = s.indexOf('\n', p);
           if (e < 0) { if (!final || p >= n) break; e = n; }
           if (e > p) parser.line(src, s, p, e, base + p);
           p = e + 1;
           if (p >= n) { p = Math.min(p, n); break; }
+        }
+        // Content tags. tccd and its subsystem log nothing but privacy-permission decisions.
+        const work = src.n > 0 && !(parser.tagged && this.collectorTags);
+        const tccd = D.proc.map.get('tccd'), tcc = D.sub.map.get('com.apple.TCC');
+        if (work && (tccd !== undefined || tcc !== undefined)) {
+          for (let r = first; r < src.n; r++) if (src.proc[r] === tccd || (tcc !== undefined && src.sub[r] === tcc)) src.tags[r] |= 1 << this.tagId('permissions');
+        }
+        for (const hint of work ? CONTENT_HINTS : []) {
+          let row = Math.max(0, first - 1);               // a continuation line can belong to the previous chunk's last entry
+          hint.lastIndex = 0;
+          for (let m; (m = hint.exec(s)) && m.index < p;) {
+            const at = base + m.index;
+            if (at < src.off[row]) continue;              // before the first entry: a header line
+            while (row + 1 < src.n && src.off[row + 1] <= at) row++;
+            const a = src.off[row] - base, b = Math.min(p, a + src.len[row]);
+            if (m.index < b) {
+              const text = s.substring(Math.max(0, a), b);
+              for (const [name, rx] of CONTENT_TAGS) if (rx.test(text)) src.tags[row] |= 1 << this.tagId(name);
+            }
+            hint.lastIndex = Math.max(b, m.index + 1);
+          }
         }
         if (p < n) carry = buf.slice(p);
         base += p;
@@ -2348,7 +2422,12 @@ const Core = (() => {
       [-6e3, 'Fault', 'Microsoft Excel', 4121, 'excel', 'Unhandled exception in PivotCache refresh\\n  0  Microsoft Excel  0x0000000104a3c1f0 PivotFilterApply + 532\\n  1  Microsoft Excel  0x0000000104a3b9d4 PivotTableUpdate + 96'],
       [0, 'Default', 'launchd', 1, 'mentions-excel', 'exited due to SIGSEGV | sent by exc handler[4121], ran for 5714012ms: application.com.microsoft.Excel.4121'],
       [1500, 'Default', 'ReportCrash', 5120, 'mentions-excel', 'Saved crash report for Microsoft Excel[4121] version 16.114 to Microsoft Excel-2026-03-10-103500.ips'],
-      [2500, 'Default', 'Microsoft Error Reporting', 5131, 'microsoft', 'Crash log found for Microsoft Excel; preparing report dialog'],
+      [2500, 'Default', 'Microsoft Error Reporting', 5131, 'microsoft', 'Crash log found for Microsoft Excel; preparing report dialog'],      // a little permissions and storage activity, so those tags have something to show
+      [-83 * 60e3, 'Default', 'tccd', 412, 'mentions-excel,permissions', 'AUTHREQ_SUBJECT: msgID=412.38, subject=com.microsoft.Excel,'],
+      [-83 * 60e3 + 40, 'Error', 'tccd', 412, 'mentions-excel,permissions', 'Prompting policy for hardened runtime; service: kTCCServiceCalendar requires entitlement com.apple.security.personal-information.calendars but it is missing for accessing={TCCDProcess: identifier=com.microsoft.Excel, pid=4121}'],
+      [-52 * 60e3, 'Error', 'kernel', 0, 'mentions-excel,permissions', 'Sandbox: Microsoft Excel(4121) deny(1) file-read-data /Volumes/Finance/Regional Sales Pivot.xlsx'],
+      [-52 * 60e3 + 900, 'Default', 'Microsoft Excel', 4121, 'excel,permissions', 'os_unix.c:47395: (1) open(/Volumes/Finance/.quarantine-events) - Operation not permitted'],
+      [-19 * 60e3, 'Error', 'Microsoft Excel', 4121, 'excel,storage', 'AutoRecover could not save "Regional Sales Pivot.xlsx": Error Domain=NSPOSIXErrorDomain Code=28 "No space left on device"'],
     ];
     for (const [dt, lv, pr, p, tags, msg] of burst) U.push(`${local(crash + dt, 6)}-0400\t${stamp(crash + dt, 6)}\t${lv}\t${pr}\t${p}\t${pr}\t\t\t${tags}\t${msg}`);
     const header = U.shift();
@@ -2394,7 +2473,7 @@ const Core = (() => {
       M.push(`${local(t, 0)},${stamp(t, 0)},${up ? 4121 : 4307},${(rnd() * (up && k > 0.9 ? 99 : 30)).toFixed(1)},${foot},${cmp},${40 + (rnd() * 12 | 0)},${up && k > 0.85 ? 4 : up && k > 0.6 ? 2 : 1},${Math.round(up ? 5200 - 4700 * k : 4200)},${Math.round(up ? 600 + 4200 * k : 1500)},${Math.round(up ? 3900 * k * k : 1200)}`);
     }
     add('excel_memory_timeline.csv', M.join('\n') + '\n');
-    add('manifest.tsv', 'component\tstatus\tdetails\nsystem\tcomplete\tsystem, memory, sleep/wake, network state\noffice\tcomplete\tversions, Excel logs, AutoRecover, add-ins, preferences\nreports\tcomplete\tcrash, hang, spin and jetsam reports\nunified_logs\tcomplete\t1 day(s), 2026-03-10 through 2026-03-10\n');
+    add('manifest.tsv', 'component\tstatus\tdetails\nunified_log_tags\tcomplete\texcel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, permissions, storage, logs-dropped\nsystem\tcomplete\tsystem, memory, sleep/wake, network state\noffice\tcomplete\tversions, Excel logs, AutoRecover, add-ins, preferences\nreports\tcomplete\tcrash, hang, spin and jetsam reports\nunified_logs\tcomplete\t1 day(s), 2026-03-10 through 2026-03-10\n');
     add('collection.log', '[12:01:02] Excel diagnostics: collect (2026-03-10 through 2026-03-10) for user sample\n[12:01:02] System information\n[12:01:09] Unified logs (Excel, hangs/terminations, memory pressure), 2026-03-10 through 2026-03-10\n[12:03:40] Done.\n');
     add('summary.md', `# Excel diagnostics summary\n\nThis is made-up sample data that ships with the viewer. It tells one story: Excel's memory climbs for an hour and a half, a PivotTable filter pushes it over the limit, and Excel crashes at ${local(crash, 0)} local time and is relaunched.\n\n- Collected: 2026-03-10 12:03:40 EDT\n- Console user: sample\n- Mode: collect\n- Incident window: 2026-03-10 through 2026-03-10 (1 day(s))\n\n## Collection status\n\n| Component | Status | Details |\n| --- | --- | --- |\n| system | complete | system, memory, sleep/wake, network state |\n| office | complete | versions, Excel logs, AutoRecover, add-ins, preferences |\n| reports | complete | crash, hang, spin and jetsam reports |\n| unified_logs | complete | 1 day(s) |\n\n## Things to try\n\n1. Search for \`pivot\`, then press \`e\` to step through the errors.\n2. Drag across the spike in the histogram to zoom in on the crash.\n3. Open the Memory tab and click just before the drop.\n`);
     return files;
@@ -2624,38 +2703,71 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
   }
 
   // ---------- facets ----------
-  const FACETS = [['sev', 'Severity', 'level'], ['group', 'Source', 'source'], ['tag', 'Tag', 'tag'], ['proc', 'Process', 'process'],
-    ['sub', 'Subsystem / area', 'subsystem'], ['cat', 'Category', 'category'], ['lvl', 'Original level', 'level'], ['file', 'File', 'file']];
+  // Severity is one list: the six severities, and under each the levels the logs themselves use (macOS says Default
+  // and Fault, Excel says Medium, Monitorable and Unexpected). Choosing a severity chooses all of its levels.
+  const FACETS = [['lvl', 'Severity', 'level'], ['group', 'Source', 'source'], ['tag', 'Tag', 'tag'], ['proc', 'Process', 'process'],
+    ['sub', 'Subsystem / area', 'subsystem'], ['cat', 'Category', 'category'], ['file', 'File', 'file']];
   const openFacets = new Set();                         // every group starts collapsed; a badge shows how many values are chosen
+  const levelsOf = (sev) => info.lvlSev.reduce((ids, sv, v) => (sv === sev ? ids.concat(v) : ids), []);
+  const sameWord = (a, b) => a.toLowerCase() === b.toLowerCase();
+  function toggleSeverity(sev, mode) {
+    const f = S.facets.lvl || (S.facets.lvl = { inc: [], exc: [] }), other = mode === 'inc' ? 'exc' : 'inc', ids = levelsOf(sev);
+    const all = ids.every((v) => f[mode].includes(v));
+    f[other] = f[other].filter((v) => !ids.includes(v));
+    f[mode] = all ? f[mode].filter((v) => !ids.includes(v)) : [...new Set(f[mode].concat(ids))];
+    schedule();
+  }
+  const facetRow = (cls, attr, title, label, n, dot) => `<div class="fv${cls}" ${attr} title="${title}&#10;Click to show only this. Click &minus; to hide it."><span class="lbl">${dot ? '<i></i>' : ''}${esc(label)}</span>` +
+    `<span class="n">${n < 0 ? '–' : fmtN(n)}</span><button class="x" aria-label="Hide ${esc(label)}">−</button></div>`;
+  function severityRows(f, sel) {
+    const count = new Map(f.values), picked = (v) => sel.inc.includes(v) || sel.exc.includes(v);
+    let html = '', chosen = 0;
+    for (let sev = SEV.length - 1; sev >= 0; sev--) {
+      const ids = levelsOf(sev);
+      const inc = ids.length > 0 && ids.every((v) => sel.inc.includes(v)), exc = ids.length > 0 && ids.every((v) => sel.exc.includes(v));
+      const shown = ids.filter((v) => count.get(v) > 0 || count.get(v) < 0 || (!inc && !exc && picked(v))).sort((x, y) => (count.get(y) || 0) - (count.get(x) || 0));
+      const total = ids.some((v) => count.get(v) < 0) ? -1 : ids.reduce((sum, v) => sum + (count.get(v) || 0), 0);
+      chosen += inc || exc ? 1 : ids.filter(picked).length;
+      html += facetRow(` s${sev}${inc ? ' inc' : exc ? ' exc' : ''}`, `data-sev="${sev}"`, `${SEV[sev]}: every level counted as ${SEV[sev]}`, SEV[sev], total, true);
+      if (shown.length > 1 || (shown.length === 1 && !sameWord(info.names.lvl[shown[0]] || '', SEV[sev]))) {
+        for (const v of shown) {
+          const name = info.names.lvl[v] || '(no level given)';
+          html += facetRow(` sub${sel.inc.includes(v) ? ' inc' : sel.exc.includes(v) ? ' exc' : ''}`, `data-v="${v}"`, `Logged as ${esc(name)}, counted as ${SEV[sev]}`, name, count.get(v) || 0, false);
+        }
+      }
+    }
+    return { html, chosen };
+  }
   function renderFacets() {
     let html = '';
     for (const [name, title, field] of FACETS) {
       const f = lastFacets[name];
       if (!f || !f.values.length) continue;
-      const sel = S.facets[name] || { inc: [], exc: [] }, nSel = sel.inc.length + sel.exc.length;
-      html += `<details data-f="${name}"${openFacets.has(name) ? ' open' : ''}><summary>${title}${nSel ? `<b>${nSel}</b>` : ''}</summary>`;
-      for (const [v, n] of f.values) {
-        const full = info.names[name][v] || '(none)', label = name === 'file' ? full.slice(full.lastIndexOf('/') + 1) : full;
-        const cls = (sel.inc.includes(v) ? ' inc' : sel.exc.includes(v) ? ' exc' : '') + (name === 'sev' ? ` s${v}` : '');
-        html += `<div class="fv${cls}" data-v="${v}" title="${esc(full)}&#10;Click to show only this. Click &minus; to hide it."><span class="lbl">${name === 'sev' ? '<i></i>' : ''}${esc(label)}</span>` +
-          `<span class="n">${n < 0 ? '–' : fmtN(n)}</span><button class="x" aria-label="Hide ${esc(label)}">−</button></div>`;
+      const sel = S.facets[name] || { inc: [], exc: [] };
+      let body = '', nSel = sel.inc.length + sel.exc.length;
+      if (name === 'lvl') ({ html: body, chosen: nSel } = severityRows(f, sel));
+      else {
+        for (const [v, n] of f.values) {
+          const full = info.names[name][v] || '(none)', label = name === 'file' ? full.slice(full.lastIndexOf('/') + 1) : full;
+          body += facetRow(sel.inc.includes(v) ? ' inc' : sel.exc.includes(v) ? ' exc' : '', `data-v="${v}"`, esc(full), label, n, false);
+        }
+        if (f.all > f.values.length) body += `<div class="more">${fmtN(f.all - f.values.length)} more. Type <code>${field}:text</code> in the search box to match any of them.</div>`;
       }
-      if (f.all > f.values.length) html += `<div class="more">${fmtN(f.all - f.values.length)} more. Type <code>${field}:text</code> in the search box to match any of them.</div>`;
-      html += '</details>';
+      html += `<details data-f="${name}"${openFacets.has(name) ? ' open' : ''}><summary>${title}${nSel ? `<b>${nSel}</b>` : ''}</summary>${body}</details>`;
     }
     $('#facets').innerHTML = html;
   }
 
   // ---------- histogram ----------
   function drawHist() {
-    const h = view.hist, el = $('#hist'), W = el.clientWidth, H = 92, top = 14, bottom = 18, plotH = H - top - bottom;
+    const h = view.hist, el = $('#hist'), W = el.clientWidth, H = el.clientHeight || 140, top = 6, bottom = 18, plotH = H - top - bottom;
     if (!h || !W) return;
     const nb = h.nb, bw = W / nb;
     let max = 0;
     for (let b = 0; b < nb; b++) max = Math.max(max, h.bins[b * 3] + h.bins[b * 3 + 1] + h.bins[b * 3 + 2]);
     const base = top + plotH;
     let s = `<svg width="${W}" height="${H}" role="img" aria-label="Number of entries over time, by severity">`;
-    s += `<line class="grid" x1="0" x2="${W}" y1="${top + 0.5}" y2="${top + 0.5}"/><text class="tick" x="2" y="${top - 4}">${max ? fmtN(max) + ' per bar' : 'No entries in this window'}</text>`;
+    if (!max) s += `<text class="tick" x="${W / 2}" y="${top + plotH / 2}" text-anchor="middle">No entries in this window</text>`;
     const w = Math.max(1, bw - 2);
     for (let b = 0; b < nb && max; b++) {
       const parts = [[h.bins[b * 3], 'o'], [h.bins[b * 3 + 1], 'w'], [h.bins[b * 3 + 2], 'e']].filter((p) => p[0]);
@@ -2687,7 +2799,15 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
     const el = $('#hist'), tip = $('#histTip');
     let down = null;
     const at = (e) => { const r = el.getBoundingClientRect(); return clamp(e.clientX - r.left, 0, r.width); };
-    el.addEventListener('pointerdown', (e) => { if (!view.hist) return; down = at(e); el.setPointerCapture(e.pointerId); });
+    el.addEventListener('pointerdown', (e) => { if (!view.hist || e.button !== 0 || e.ctrlKey) return; down = at(e); el.setPointerCapture(e.pointerId); });
+    el.addEventListener('contextmenu', (e) => {         // right-click: twice the time span, keeping the moment under the pointer in place
+      e.preventDefault();
+      const h = view.hist;
+      if (!h) return;
+      if (S.t0 == null && S.t1 == null) { flash('Already showing all time'); return; }
+      const tc = h.t0 + ((h.t1 - h.t0) * at(e)) / el.clientWidth;
+      setRange(tc - (tc - h.t0) * 2, tc + (h.t1 - tc) * 2);
+    });
     el.addEventListener('pointermove', (e) => {
       const h = view.hist;
       if (!h) return;
@@ -2813,10 +2933,10 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
     for (let k = first; k < first + n; k++) {
       const r = rowAt(k);
       if (!r) { html += `<div class="r ph" data-k="${k}"><span class="c t">…</span></div>`; continue; }
-      const sev = info.lvlSev[r[3]], src = info.sources[r[2]];
+      const sev = info.lvlSev[r[3]], src = info.sources[r[2]], lv = info.names.lvl[r[3]] || SEV[sev];
       html += `<div class="r s${sev}${r[0] === selPos ? ' sel' : ''}" data-k="${k}">` +
         `<span class="c t">${pins.has(r[0]) ? '<b class="pin" title="Pinned">★</b>' : ''}${fmtTime(r[1])}</span>` +
-        `<span class="c sv"><i></i>${SEV[sev]}</span>` +
+        `<span class="c sv"${sameWord(lv, SEV[sev]) ? '' : ` title="Logged as ${esc(lv)}, counted as ${SEV[sev]}"`}><i></i>${esc(lv)}</span>` +
         `<span class="c so" title="${esc(src.path)}">${esc(src.short)}</span>` +
         `<span class="c p">${esc(info.names.proc[r[4]])}${r[5] ? `<u>${r[5]}</u>` : ''}</span>` +
         `<span class="c m">${mark(oneLine(r[9]))}</span></div>`;
@@ -2854,7 +2974,7 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
     const filt = (name, v) => `<span class="fb"><button data-f="${name}" data-v="${v}" data-m="inc" title="Show only this">+</button><button data-f="${name}" data-v="${v}" data-m="exc" title="Hide this">−</button></span>`;
     const rows = [
       ['Time', `${esc(fmtTime(r[1]))} <span class="dim">${tzLabel(r[1])}${tzMode !== 'utc' ? ` · ${new Date(Math.floor(r[1])).toISOString().replace('T', ' ').replace('Z', '')} UTC` : ''}</span>`],
-      ['Severity', `<span class="sv s${sev}"><i></i>${SEV[sev]}</span>${N.lvl[r[3]] && N.lvl[r[3]] !== SEV[sev] ? ` <span class="dim">logged as ${esc(N.lvl[r[3]])}</span>` : ''}${filt('sev', sev)}`],
+      ['Severity', `<span class="sv s${sev}"><i></i>${esc(N.lvl[r[3]] || SEV[sev])}</span>${N.lvl[r[3]] && !sameWord(N.lvl[r[3]], SEV[sev]) ? ` <span class="dim">counted as ${SEV[sev]}</span>` : ''}${filt('lvl', r[3])}`],
       ['Source', `${esc(src.group)} <span class="dim">${esc(src.path)}</span>${filt('file', r[2])}`],
       N.proc[r[4]] && ['Process', `${esc(N.proc[r[4]])}${filt('proc', r[4])}`],
       r[5] && ['PID', `${r[5]} <span class="fb"><button data-pid="${r[5]}" title="Add pid:${r[5]} to the search">+</button></span>`],
@@ -3172,10 +3292,16 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
     S.facets = {};
     for (const [name, sel] of Object.entries(v.filters || {})) {
       const names = info.names[name];
-      if (!names || !sel) continue;
+      if (!names || !sel || name === 'sev') continue;
       const ids = (list) => (Array.isArray(list) ? list : []).map((x) => names.indexOf(x)).filter((i) => i >= 0);
       const f = { inc: ids(sel.show), exc: ids(sel.hide) };
       if (f.inc.length || f.exc.length) S.facets[name] = f;
+    }
+    const old = v.filters && v.filters.sev;               // a view saved when Severity and the logs' own levels were separate lists
+    if (old) {
+      const ids = (list) => (Array.isArray(list) ? list : []).flatMap((x) => levelsOf(SEV.indexOf(x)));
+      const f = S.facets.lvl || (S.facets.lvl = { inc: [], exc: [] });
+      f.inc = [...new Set(f.inc.concat(ids(old.show)))]; f.exc = [...new Set(f.exc.concat(ids(old.hide)))];
     }
     S.t0 = typeof v.from === 'number' ? v.from : null; S.t1 = typeof v.to === 'number' ? v.to : null;
     if (['bundle', 'utc', 'browser'].includes(v.timeZone)) { tzMode = v.timeZone; $('#tz').value = tzMode; renderOverview(); }
@@ -3278,7 +3404,8 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
   $('#facets').addEventListener('click', (e) => {
     const fv = e.target.closest('.fv');
     if (!fv) return;
-    toggleFacet(fv.closest('details').dataset.f, +fv.dataset.v, e.target.closest('.x') || e.altKey ? 'exc' : 'inc');
+    const mode = e.target.closest('.x') || e.altKey ? 'exc' : 'inc';
+    if (fv.dataset.sev !== undefined) toggleSeverity(+fv.dataset.sev, mode); else toggleFacet(fv.closest('details').dataset.f, +fv.dataset.v, mode);
   });
   $('#facets').addEventListener('toggle', (e) => { const n = e.target.dataset && e.target.dataset.f; if (n) { if (e.target.open) openFacets.add(n); else openFacets.delete(n); } }, true);
   $('#facetToggle').addEventListener('click', () => $('#tab-timeline').classList.toggle('nofacets'));

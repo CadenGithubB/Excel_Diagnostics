@@ -89,7 +89,7 @@ body.drag .dropzone, body.drag #app { outline: 3px solid var(--accent); outline-
 .histhead i, #histTip i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 .histhead input { width: 150px; font-family: var(--mono); font-size: 11.5px; padding: 2px 6px; }
 .histhead button { padding: 1px 8px; font-size: 12px; }
-#hist { height: 92px; cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
+#hist { height: 140px; cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
 #hist svg, .chart svg { display: block; }
 .bo, i.bo { fill: var(--other); background: var(--other); }
 .bw, i.bw { fill: var(--warning); background: var(--warning); }
@@ -123,13 +123,15 @@ body.drag .dropzone, body.drag #app { outline: 3px solid var(--accent); outline-
 .fv.inc .lbl::before { content: "✓ "; color: var(--accent); }
 .fv.exc .lbl { text-decoration: line-through; color: var(--muted); }
 .fv.exc .x { color: var(--critical); }
+.fv.sub { padding-left: 34px; }
+.fv.sub .lbl { color: var(--ink2); }
 .more { color: var(--muted); padding: 4px 14px; font-size: 12px; }
 .fv i, .sv i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; border: 1.5px solid var(--axis); }
 .s5 i, .s4 i { background: var(--critical); border-color: var(--critical); }
 .s3 i { background: var(--warning); border-color: var(--warning); }
 
 .tablewrap { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
-.thead, .r { display: grid; grid-template-columns: 184px 78px 92px 200px minmax(0, 1fr); }
+.thead, .r { display: grid; grid-template-columns: 192px 116px 106px 240px minmax(0, 1fr); }
 .thead { font-size: 11.5px; color: var(--ink2); border-bottom: 1px solid var(--hair); background: var(--surface); padding-right: 14px; }
 .thead span { padding: 3px 8px; overflow: hidden; white-space: nowrap; }
 #vs { flex: 1; min-height: 60px; overflow-y: scroll; overflow-x: hidden; position: relative; outline: none; background: var(--surface); }
@@ -230,6 +232,7 @@ dialog td:first-child { white-space: nowrap; padding-right: 18px; }
   #bundleName { display: none; }
   .treewrap { width: 42%; }
   .histhead input { width: 136px; }
+  #hist { height: 96px; }
   .histhead .dim { display: none; }
   #detail { max-height: 62%; }
 }

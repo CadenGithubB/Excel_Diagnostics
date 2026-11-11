@@ -67,7 +67,7 @@
         <button role="menuitem" data-cmd="exportPins"><span>Export pinned entries</span><small></small></button>
         <button role="menuitem" data-cmd="saveFile"><span>Save a copy of the open file</span><small></small></button>
         <hr>
-        <button role="menuitem" data-cmd="script" title="Download or read excel_diagnostics.sh, the script that collects these bundles">Get the collector script…</button>
+        <button role="menuitem" data-cmd="script" title="Download or read excel_diagnostics.sh, the script that collects these bundles">Get the collector script</button>
         <hr>
         <button role="menuitem" data-cmd="close">Close bundle</button>
       </div>
@@ -114,7 +114,7 @@
       <div class="histhead">
         <span><i class="be"></i>Errors and faults</span><span><i class="bw"></i>Warnings</span><span><i class="bo"></i>Everything else</span>
         <span class="spacer"></span>
-        <span class="dim">Drag on the chart to zoom</span>
+        <span class="dim">Drag to zoom in, right-click to zoom out</span>
         <input id="tFrom" type="text" aria-label="Window start" spellcheck="false">
         <span>to</span>
         <input id="tTo" type="text" aria-label="Window end" spellcheck="false">
@@ -161,6 +161,8 @@
     <tr><td><code>process:excel</code></td><td>Process name contains "excel". Also <code>level:</code> <code>pid:</code> <code>subsystem:</code> <code>category:</code> <code>tag:</code> <code>source:</code></td></tr>
   </table>
   <p>The list on the left filters by severity, source, tag and process: click a value to show only it, or its − to hide it. The counts beside the other values show what choosing them would give.</p>
+  <p>Under each severity are the levels the logs themselves use. macOS writes Default, Info, Debug, Error and Fault; Excel writes Medium, Monitorable (worth watching, not a failure) and Unexpected (something went wrong). Choosing a severity chooses all of its levels.</p>
+  <p>On the chart, drag to zoom in to a time span, right-click to zoom out, and click to jump the list to that moment.</p>
   <h2>Keys</h2>
   <table>
     <tr><td><code>/</code></td><td>Go to the search box</td></tr>

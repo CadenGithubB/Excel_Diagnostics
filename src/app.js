@@ -195,38 +195,71 @@
   }
 
   // ---------- facets ----------
-  const FACETS = [['sev', 'Severity', 'level'], ['group', 'Source', 'source'], ['tag', 'Tag', 'tag'], ['proc', 'Process', 'process'],
-    ['sub', 'Subsystem / area', 'subsystem'], ['cat', 'Category', 'category'], ['lvl', 'Original level', 'level'], ['file', 'File', 'file']];
+  // Severity is one list: the six severities, and under each the levels the logs themselves use (macOS says Default
+  // and Fault, Excel says Medium, Monitorable and Unexpected). Choosing a severity chooses all of its levels.
+  const FACETS = [['lvl', 'Severity', 'level'], ['group', 'Source', 'source'], ['tag', 'Tag', 'tag'], ['proc', 'Process', 'process'],
+    ['sub', 'Subsystem / area', 'subsystem'], ['cat', 'Category', 'category'], ['file', 'File', 'file']];
   const openFacets = new Set();                         // every group starts collapsed; a badge shows how many values are chosen
+  const levelsOf = (sev) => info.lvlSev.reduce((ids, sv, v) => (sv === sev ? ids.concat(v) : ids), []);
+  const sameWord = (a, b) => a.toLowerCase() === b.toLowerCase();
+  function toggleSeverity(sev, mode) {
+    const f = S.facets.lvl || (S.facets.lvl = { inc: [], exc: [] }), other = mode === 'inc' ? 'exc' : 'inc', ids = levelsOf(sev);
+    const all = ids.every((v) => f[mode].includes(v));
+    f[other] = f[other].filter((v) => !ids.includes(v));
+    f[mode] = all ? f[mode].filter((v) => !ids.includes(v)) : [...new Set(f[mode].concat(ids))];
+    schedule();
+  }
+  const facetRow = (cls, attr, title, label, n, dot) => `<div class="fv${cls}" ${attr} title="${title}&#10;Click to show only this. Click &minus; to hide it."><span class="lbl">${dot ? '<i></i>' : ''}${esc(label)}</span>` +
+    `<span class="n">${n < 0 ? '–' : fmtN(n)}</span><button class="x" aria-label="Hide ${esc(label)}">−</button></div>`;
+  function severityRows(f, sel) {
+    const count = new Map(f.values), picked = (v) => sel.inc.includes(v) || sel.exc.includes(v);
+    let html = '', chosen = 0;
+    for (let sev = SEV.length - 1; sev >= 0; sev--) {
+      const ids = levelsOf(sev);
+      const inc = ids.length > 0 && ids.every((v) => sel.inc.includes(v)), exc = ids.length > 0 && ids.every((v) => sel.exc.includes(v));
+      const shown = ids.filter((v) => count.get(v) > 0 || count.get(v) < 0 || (!inc && !exc && picked(v))).sort((x, y) => (count.get(y) || 0) - (count.get(x) || 0));
+      const total = ids.some((v) => count.get(v) < 0) ? -1 : ids.reduce((sum, v) => sum + (count.get(v) || 0), 0);
+      chosen += inc || exc ? 1 : ids.filter(picked).length;
+      html += facetRow(` s${sev}${inc ? ' inc' : exc ? ' exc' : ''}`, `data-sev="${sev}"`, `${SEV[sev]}: every level counted as ${SEV[sev]}`, SEV[sev], total, true);
+      if (shown.length > 1 || (shown.length === 1 && !sameWord(info.names.lvl[shown[0]] || '', SEV[sev]))) {
+        for (const v of shown) {
+          const name = info.names.lvl[v] || '(no level given)';
+          html += facetRow(` sub${sel.inc.includes(v) ? ' inc' : sel.exc.includes(v) ? ' exc' : ''}`, `data-v="${v}"`, `Logged as ${esc(name)}, counted as ${SEV[sev]}`, name, count.get(v) || 0, false);
+        }
+      }
+    }
+    return { html, chosen };
+  }
   function renderFacets() {
     let html = '';
     for (const [name, title, field] of FACETS) {
       const f = lastFacets[name];
       if (!f || !f.values.length) continue;
-      const sel = S.facets[name] || { inc: [], exc: [] }, nSel = sel.inc.length + sel.exc.length;
-      html += `<details data-f="${name}"${openFacets.has(name) ? ' open' : ''}><summary>${title}${nSel ? `<b>${nSel}</b>` : ''}</summary>`;
-      for (const [v, n] of f.values) {
-        const full = info.names[name][v] || '(none)', label = name === 'file' ? full.slice(full.lastIndexOf('/') + 1) : full;
-        const cls = (sel.inc.includes(v) ? ' inc' : sel.exc.includes(v) ? ' exc' : '') + (name === 'sev' ? ` s${v}` : '');
-        html += `<div class="fv${cls}" data-v="${v}" title="${esc(full)}&#10;Click to show only this. Click &minus; to hide it."><span class="lbl">${name === 'sev' ? '<i></i>' : ''}${esc(label)}</span>` +
-          `<span class="n">${n < 0 ? '–' : fmtN(n)}</span><button class="x" aria-label="Hide ${esc(label)}">−</button></div>`;
+      const sel = S.facets[name] || { inc: [], exc: [] };
+      let body = '', nSel = sel.inc.length + sel.exc.length;
+      if (name === 'lvl') ({ html: body, chosen: nSel } = severityRows(f, sel));
+      else {
+        for (const [v, n] of f.values) {
+          const full = info.names[name][v] || '(none)', label = name === 'file' ? full.slice(full.lastIndexOf('/') + 1) : full;
+          body += facetRow(sel.inc.includes(v) ? ' inc' : sel.exc.includes(v) ? ' exc' : '', `data-v="${v}"`, esc(full), label, n, false);
+        }
+        if (f.all > f.values.length) body += `<div class="more">${fmtN(f.all - f.values.length)} more. Type <code>${field}:text</code> in the search box to match any of them.</div>`;
       }
-      if (f.all > f.values.length) html += `<div class="more">${fmtN(f.all - f.values.length)} more. Type <code>${field}:text</code> in the search box to match any of them.</div>`;
-      html += '</details>';
+      html += `<details data-f="${name}"${openFacets.has(name) ? ' open' : ''}><summary>${title}${nSel ? `<b>${nSel}</b>` : ''}</summary>${body}</details>`;
     }
     $('#facets').innerHTML = html;
   }
 
   // ---------- histogram ----------
   function drawHist() {
-    const h = view.hist, el = $('#hist'), W = el.clientWidth, H = 92, top = 14, bottom = 18, plotH = H - top - bottom;
+    const h = view.hist, el = $('#hist'), W = el.clientWidth, H = el.clientHeight || 140, top = 6, bottom = 18, plotH = H - top - bottom;
     if (!h || !W) return;
     const nb = h.nb, bw = W / nb;
     let max = 0;
     for (let b = 0; b < nb; b++) max = Math.max(max, h.bins[b * 3] + h.bins[b * 3 + 1] + h.bins[b * 3 + 2]);
     const base = top + plotH;
     let s = `<svg width="${W}" height="${H}" role="img" aria-label="Number of entries over time, by severity">`;
-    s += `<line class="grid" x1="0" x2="${W}" y1="${top + 0.5}" y2="${top + 0.5}"/><text class="tick" x="2" y="${top - 4}">${max ? fmtN(max) + ' per bar' : 'No entries in this window'}</text>`;
+    if (!max) s += `<text class="tick" x="${W / 2}" y="${top + plotH / 2}" text-anchor="middle">No entries in this window</text>`;
     const w = Math.max(1, bw - 2);
     for (let b = 0; b < nb && max; b++) {
       const parts = [[h.bins[b * 3], 'o'], [h.bins[b * 3 + 1], 'w'], [h.bins[b * 3 + 2], 'e']].filter((p) => p[0]);
@@ -258,7 +291,15 @@
     const el = $('#hist'), tip = $('#histTip');
     let down = null;
     const at = (e) => { const r = el.getBoundingClientRect(); return clamp(e.clientX - r.left, 0, r.width); };
-    el.addEventListener('pointerdown', (e) => { if (!view.hist) return; down = at(e); el.setPointerCapture(e.pointerId); });
+    el.addEventListener('pointerdown', (e) => { if (!view.hist || e.button !== 0 || e.ctrlKey) return; down = at(e); el.setPointerCapture(e.pointerId); });
+    el.addEventListener('contextmenu', (e) => {         // right-click: twice the time span, keeping the moment under the pointer in place
+      e.preventDefault();
+      const h = view.hist;
+      if (!h) return;
+      if (S.t0 == null && S.t1 == null) { flash('Already showing all time'); return; }
+      const tc = h.t0 + ((h.t1 - h.t0) * at(e)) / el.clientWidth;
+      setRange(tc - (tc - h.t0) * 2, tc + (h.t1 - tc) * 2);
+    });
     el.addEventListener('pointermove', (e) => {
       const h = view.hist;
       if (!h) return;
@@ -384,10 +425,10 @@
     for (let k = first; k < first + n; k++) {
       const r = rowAt(k);
       if (!r) { html += `<div class="r ph" data-k="${k}"><span class="c t">…</span></div>`; continue; }
-      const sev = info.lvlSev[r[3]], src = info.sources[r[2]];
+      const sev = info.lvlSev[r[3]], src = info.sources[r[2]], lv = info.names.lvl[r[3]] || SEV[sev];
       html += `<div class="r s${sev}${r[0] === selPos ? ' sel' : ''}" data-k="${k}">` +
         `<span class="c t">${pins.has(r[0]) ? '<b class="pin" title="Pinned">★</b>' : ''}${fmtTime(r[1])}</span>` +
-        `<span class="c sv"><i></i>${SEV[sev]}</span>` +
+        `<span class="c sv"${sameWord(lv, SEV[sev]) ? '' : ` title="Logged as ${esc(lv)}, counted as ${SEV[sev]}"`}><i></i>${esc(lv)}</span>` +
         `<span class="c so" title="${esc(src.path)}">${esc(src.short)}</span>` +
         `<span class="c p">${esc(info.names.proc[r[4]])}${r[5] ? `<u>${r[5]}</u>` : ''}</span>` +
         `<span class="c m">${mark(oneLine(r[9]))}</span></div>`;
@@ -425,7 +466,7 @@
     const filt = (name, v) => `<span class="fb"><button data-f="${name}" data-v="${v}" data-m="inc" title="Show only this">+</button><button data-f="${name}" data-v="${v}" data-m="exc" title="Hide this">−</button></span>`;
     const rows = [
       ['Time', `${esc(fmtTime(r[1]))} <span class="dim">${tzLabel(r[1])}${tzMode !== 'utc' ? ` · ${new Date(Math.floor(r[1])).toISOString().replace('T', ' ').replace('Z', '')} UTC` : ''}</span>`],
-      ['Severity', `<span class="sv s${sev}"><i></i>${SEV[sev]}</span>${N.lvl[r[3]] && N.lvl[r[3]] !== SEV[sev] ? ` <span class="dim">logged as ${esc(N.lvl[r[3]])}</span>` : ''}${filt('sev', sev)}`],
+      ['Severity', `<span class="sv s${sev}"><i></i>${esc(N.lvl[r[3]] || SEV[sev])}</span>${N.lvl[r[3]] && !sameWord(N.lvl[r[3]], SEV[sev]) ? ` <span class="dim">counted as ${SEV[sev]}</span>` : ''}${filt('lvl', r[3])}`],
       ['Source', `${esc(src.group)} <span class="dim">${esc(src.path)}</span>${filt('file', r[2])}`],
       N.proc[r[4]] && ['Process', `${esc(N.proc[r[4]])}${filt('proc', r[4])}`],
       r[5] && ['PID', `${r[5]} <span class="fb"><button data-pid="${r[5]}" title="Add pid:${r[5]} to the search">+</button></span>`],
@@ -743,10 +784,16 @@
     S.facets = {};
     for (const [name, sel] of Object.entries(v.filters || {})) {
       const names = info.names[name];
-      if (!names || !sel) continue;
+      if (!names || !sel || name === 'sev') continue;
       const ids = (list) => (Array.isArray(list) ? list : []).map((x) => names.indexOf(x)).filter((i) => i >= 0);
       const f = { inc: ids(sel.show), exc: ids(sel.hide) };
       if (f.inc.length || f.exc.length) S.facets[name] = f;
+    }
+    const old = v.filters && v.filters.sev;               // a view saved when Severity and the logs' own levels were separate lists
+    if (old) {
+      const ids = (list) => (Array.isArray(list) ? list : []).flatMap((x) => levelsOf(SEV.indexOf(x)));
+      const f = S.facets.lvl || (S.facets.lvl = { inc: [], exc: [] });
+      f.inc = [...new Set(f.inc.concat(ids(old.show)))]; f.exc = [...new Set(f.exc.concat(ids(old.hide)))];
     }
     S.t0 = typeof v.from === 'number' ? v.from : null; S.t1 = typeof v.to === 'number' ? v.to : null;
     if (['bundle', 'utc', 'browser'].includes(v.timeZone)) { tzMode = v.timeZone; $('#tz').value = tzMode; renderOverview(); }
@@ -849,7 +896,8 @@
   $('#facets').addEventListener('click', (e) => {
     const fv = e.target.closest('.fv');
     if (!fv) return;
-    toggleFacet(fv.closest('details').dataset.f, +fv.dataset.v, e.target.closest('.x') || e.altKey ? 'exc' : 'inc');
+    const mode = e.target.closest('.x') || e.altKey ? 'exc' : 'inc';
+    if (fv.dataset.sev !== undefined) toggleSeverity(+fv.dataset.sev, mode); else toggleFacet(fv.closest('details').dataset.f, +fv.dataset.v, mode);
   });
   $('#facets').addEventListener('toggle', (e) => { const n = e.target.dataset && e.target.dataset.f; if (n) { if (e.target.open) openFacets.add(n); else openFacets.delete(n); } }, true);
   $('#facetToggle').addEventListener('click', () => $('#tab-timeline').classList.toggle('nofacets'));

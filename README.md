@@ -29,11 +29,14 @@ Every timestamped source is merged into one list, sorted by time:
 
 Sources disagree about clocks: Excel and OneDrive log in UTC, AutoUpdate in local time without saying so, the unified log in local time with an offset. The viewer converts everything to UTC and displays it in the Mac's own time zone, which it learns from the offsets in the unified log. A switch in the header changes the display to UTC or to your own zone.
 
+They disagree about names too: Excel's own log calls the process `EXCEL`, macOS calls it `Microsoft Excel`. The viewer shows both as `Microsoft Excel`, so one process filter covers both logs; the Source column still says which log an entry came from.
+
 What you can do:
 
 - **Search** with words, `"exact phrases"`, `/regular expressions/`, and `-exclusions`. `process:`, `level:`, `pid:`, `subsystem:`, `category:`, `tag:` and `source:` match one field.
-- **Filter** by severity, source, tag, process, subsystem, category and file from the list on the left. The count beside each value is what you would get by choosing it.
-- **Zoom in time** by dragging across the histogram, typing a start and end, or using the ± buttons on a selected entry.
+- **Filter** by severity, source, tag, process, subsystem, category and file from the list on the left. The count beside each value is what you would get by choosing it. Under each severity are the levels the logs themselves use (macOS: Default, Info, Debug, Error, Fault; Excel: Medium, Monitorable, Unexpected), so you can pick a whole severity or one level.
+- **Tags** say why an entry is worth a look. `excel`, `excel-helper`, `mentions-excel`, `microsoft`, `hang-report`, `memory`, `restart` and `logs-dropped` describe who logged it. `permissions` and `storage` describe what it says: sandbox and privacy (TCC) refusals, "not permitted", "denied" and missing entitlements; a full disk, an exceeded quota, I/O errors and a read-only volume. Those two are applied to every log in the bundle, Excel's own included, and look for refusals and failures, not the bare words.
+- **Zoom in time** by dragging across the histogram (right-click it to zoom back out), typing a start and end, or using the ± buttons on a selected entry.
 - **Step through errors** with `e` and `Shift+E`, **pin** entries with `p`, and press `c` to drop the filters while staying on the selected entry, so you can see what surrounded it.
 - **Export** the entries shown, or just the pinned ones, as a tab-separated file.
 - **Save a view** from the File menu: the search, filters, time window and pins go into a small `.view.json` file that holds no log text. Load it later, or hand it to a colleague who has the same bundle, to land on the same entries.
@@ -51,6 +54,8 @@ The File menu also opens another zip, folder or the sample data, saves a copy of
 Log text is never loaded into memory. The viewer keeps a compact index of each entry (time, byte range, level, process and so on, about 40 bytes) and reads the text from disk as you scroll or search. Measured in a Chromium browser on an M1 Pro MacBook Pro (16 GB) with a 1.5 GB unified-log file of 5.1 million entries: about 6 seconds to open, filters under half a second, and about 3 seconds for a text search across the whole file.
 
 A zip cannot be searched in place, so its logs are unpacked first: small ones into memory, large ones into the browser's private storage for this page. That copy is deleted when you open another bundle or next open the page. The same 1.5 GB file took 16 seconds to open from a zip. How much fits depends on the storage the browser allows the site; the page tells you if a zip is too big for it. For a bundle over about 1 GB, unzip it and drop the folder instead: the browser then reads the logs where they are, with no copy.
+
+A bundle from a collector older than the `permissions` and `storage` tags opens more slowly, because the viewer has to read every unified-log line for them: about twice as long for a file that size. Current bundles carry the tags in the `.tsv` files and say so in `manifest.tsv`.
 
 macOS `ditto`, which the collector uses, does not write zip64. Past 4 GB it stores sizes and offsets that have wrapped around. The viewer detects and repairs that, and reads real zip64 archives too.
 

@@ -271,7 +271,7 @@ const Core = (() => {
       return m;
     };
     return {
-      kind: 'unified', group: 'macOS unified log', short: 'unified',
+      kind: 'unified', group: 'macOS unified log', short: 'unified', tagged: true,
       line(src, s, p, e, off) {
         const c = s.charCodeAt(p);
         if (c < 48 || c > 57) { if (c !== 0 && !s.startsWith('local_time\t', p)) src.extend(off + e - p); return; }
@@ -348,6 +348,7 @@ const Core = (() => {
         let name = fld(s, t1 + 1, t2), pid = 0;
         const k = name.indexOf(' (0x');
         if (k > 0) { pid = parseInt(name.substring(k + 4), 16) | 0; name = name.substring(0, k); }
+        if (name === 'EXCEL') name = 'Microsoft Excel';   // what macOS calls the same process, so one filter covers both logs
         src.push(off, e - p, t, lvl.id(fld(s, t6 + 1, t7)), proc.id(name), pid, sub.id(fld(s, t3 + 1, t4)), cat.id(fld(s, t4 + 1, t5)), 0);
       },
       fields(text) {
@@ -356,6 +357,26 @@ const Core = (() => {
       },
     };
   }
+
+  // Tags worked out from what an entry says, in every source, so they also appear in bundles collected before the
+  // collector wrote them. Keep in step with TAG_PERMISSIONS_RX and TAG_STORAGE_RX in excel_diagnostics.sh.
+  // Both look for refusals and failures, not the bare words: "storage" alone is mostly cookie stores and telemetry
+  // names. Entries from tccd (the macOS privacy-permission service) are tagged permissions by process, in indexSource.
+  // A collector that writes these tags itself says so in manifest.tsv, and its unified-log .tsv files are then taken
+  // as they are: those are the files that reach gigabytes, and working the tags out again would double their load time.
+  const CONTENT_TAGS = [
+    ['permissions', /kTCCService|\bdeny\(|denied\b|\bforbidden\b|not permitted|not authori[sz]ed|unauthori[sz]ed|(?:unsatisfied|missing|requires|have|without) entitlement|\bEPERM\b|\bEACCES\b|NSCocoaErrorDomain Code=(?:257|513)\b/i],
+    ['storage', /no space left|\bENOSPC\b|(?:disk|volume|device) (?:is |was )?(?:almost |nearly )?full|\b(?:out of|low on|not enough|insufficient|low) (?:disk |free |storage )?space|quota exceeded|input\/output error|\bI\/O error|read-only file ?system|NSCocoaErrorDomain Code=(?:640|642)\b|NSPOSIXErrorDomain Code=(?:5|28|30|69)\b|0x800[37]0070\b/i],
+  ];
+  // Running those two over every log would triple the time to open a bundle. These find candidates first: a short
+  // piece of each phrase that starts on an uncommon character, so the regex engine can skip ahead quickly, with a
+  // look-behind where the piece alone is common ("space", "full"). Only the few hundred entries they find get the
+  // real test above. They are split in two because one long alternation ran slower than two shorter ones in V8.
+  // Every phrase above needs a piece here; test/core_test.js checks that each one is found.
+  const CONTENT_HINTS = [
+    /y\((?<=\b[dD]eny\()|[dD]enied\b|[pP]ermitted(?<=[nN]ot permitted)|uthori[sz]ed(?<=(?:[nN]ot a|[uU]na)uthori[sz]ed)|ntitlement(?<=(?:[uU]nsatisfied|[mM]issing|[rR]equires|have|[wW]ithout) [eE]ntitlement)|Code=\d+\b(?<=NSCocoaErrorDomain Code=(?:257|513|640|642)|NSPOSIXErrorDomain Code=(?:5|28|30|69))|[fF]ull\b(?<=(?:[dD]isk|[vV]olume|[dD]evice) (?:is |was )?(?:almost |nearly )?full)|[qQ]uota exceeded|put\/output error|-only file ?system/g,
+    /kTCC|bidden\b(?<=\b[fF]orbidden)|(?:PERM|ACCES|NOSPC)\b(?<=\bE(?:PERM|ACCES|NOSPC))|pace\b(?<=(?:[oO]ut of|[lL]ow on|[nN]ot enough|[iI]nsufficient|[lL]ow) (?:disk |free |storage )?space|[nN]o space)|I\/O error|800[37]0070\b/g,
+  ];
 
   const cap1 = (s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
   const RX_KINDS = [
@@ -479,6 +500,8 @@ const Core = (() => {
       }
       if (skippedBaseline) notes.push(`${skippedBaseline} log file(s) under repro/baseline are not on the timeline because repro/final holds a later copy of the same file.`);
 
+      const manifest = this.entries.find((en) => en.path === 'manifest.tsv');
+      this.collectorTags = !!manifest && /^unified_log_tags\t[^\n]*\bpermissions\b[^\n]*\bstorage\b/m.test(LATIN1.decode(await manifest.head(16384)));
       this.store = zips.length ? await openStore() : null;
       const total = this.sources.reduce((a, s) => a + s.entry.size, 0);
       let done = 0;
@@ -504,7 +527,7 @@ const Core = (() => {
     }
 
     async indexSource(src, onBytes) {
-      const parser = src.parser;
+      const parser = src.parser, D = this.dict;
       let carry = null, base = 0, pend = [], pendLen = 0;
       const flush = (final) => {
         if (carry) { pend.unshift(carry); pendLen += carry.length; carry = null; }
@@ -513,12 +536,34 @@ const Core = (() => {
         pend = []; pendLen = 0;
         const s = LATIN1.decode(buf), n = s.length;
         let p = 0;
+        const first = src.n;                              // entries from here on start in this chunk
         for (;;) {
           let e = s.indexOf('\n', p);
           if (e < 0) { if (!final || p >= n) break; e = n; }
           if (e > p) parser.line(src, s, p, e, base + p);
           p = e + 1;
           if (p >= n) { p = Math.min(p, n); break; }
+        }
+        // Content tags. tccd and its subsystem log nothing but privacy-permission decisions.
+        const work = src.n > 0 && !(parser.tagged && this.collectorTags);
+        const tccd = D.proc.map.get('tccd'), tcc = D.sub.map.get('com.apple.TCC');
+        if (work && (tccd !== undefined || tcc !== undefined)) {
+          for (let r = first; r < src.n; r++) if (src.proc[r] === tccd || (tcc !== undefined && src.sub[r] === tcc)) src.tags[r] |= 1 << this.tagId('permissions');
+        }
+        for (const hint of work ? CONTENT_HINTS : []) {
+          let row = Math.max(0, first - 1);               // a continuation line can belong to the previous chunk's last entry
+          hint.lastIndex = 0;
+          for (let m; (m = hint.exec(s)) && m.index < p;) {
+            const at = base + m.index;
+            if (at < src.off[row]) continue;              // before the first entry: a header line
+            while (row + 1 < src.n && src.off[row + 1] <= at) row++;
+            const a = src.off[row] - base, b = Math.min(p, a + src.len[row]);
+            if (m.index < b) {
+              const text = s.substring(Math.max(0, a), b);
+              for (const [name, rx] of CONTENT_TAGS) if (rx.test(text)) src.tags[row] |= 1 << this.tagId(name);
+            }
+            hint.lastIndex = Math.max(b, m.index + 1);
+          }
         }
         if (p < n) carry = buf.slice(p);
         base += p;
@@ -944,7 +989,12 @@ const Core = (() => {
       [-6e3, 'Fault', 'Microsoft Excel', 4121, 'excel', 'Unhandled exception in PivotCache refresh\\n  0  Microsoft Excel  0x0000000104a3c1f0 PivotFilterApply + 532\\n  1  Microsoft Excel  0x0000000104a3b9d4 PivotTableUpdate + 96'],
       [0, 'Default', 'launchd', 1, 'mentions-excel', 'exited due to SIGSEGV | sent by exc handler[4121], ran for 5714012ms: application.com.microsoft.Excel.4121'],
       [1500, 'Default', 'ReportCrash', 5120, 'mentions-excel', 'Saved crash report for Microsoft Excel[4121] version 16.114 to Microsoft Excel-2026-03-10-103500.ips'],
-      [2500, 'Default', 'Microsoft Error Reporting', 5131, 'microsoft', 'Crash log found for Microsoft Excel; preparing report dialog'],
+      [2500, 'Default', 'Microsoft Error Reporting', 5131, 'microsoft', 'Crash log found for Microsoft Excel; preparing report dialog'],      // a little permissions and storage activity, so those tags have something to show
+      [-83 * 60e3, 'Default', 'tccd', 412, 'mentions-excel,permissions', 'AUTHREQ_SUBJECT: msgID=412.38, subject=com.microsoft.Excel,'],
+      [-83 * 60e3 + 40, 'Error', 'tccd', 412, 'mentions-excel,permissions', 'Prompting policy for hardened runtime; service: kTCCServiceCalendar requires entitlement com.apple.security.personal-information.calendars but it is missing for accessing={TCCDProcess: identifier=com.microsoft.Excel, pid=4121}'],
+      [-52 * 60e3, 'Error', 'kernel', 0, 'mentions-excel,permissions', 'Sandbox: Microsoft Excel(4121) deny(1) file-read-data /Volumes/Finance/Regional Sales Pivot.xlsx'],
+      [-52 * 60e3 + 900, 'Default', 'Microsoft Excel', 4121, 'excel,permissions', 'os_unix.c:47395: (1) open(/Volumes/Finance/.quarantine-events) - Operation not permitted'],
+      [-19 * 60e3, 'Error', 'Microsoft Excel', 4121, 'excel,storage', 'AutoRecover could not save "Regional Sales Pivot.xlsx": Error Domain=NSPOSIXErrorDomain Code=28 "No space left on device"'],
     ];
     for (const [dt, lv, pr, p, tags, msg] of burst) U.push(`${local(crash + dt, 6)}-0400\t${stamp(crash + dt, 6)}\t${lv}\t${pr}\t${p}\t${pr}\t\t\t${tags}\t${msg}`);
     const header = U.shift();
@@ -990,7 +1040,7 @@ const Core = (() => {
       M.push(`${local(t, 0)},${stamp(t, 0)},${up ? 4121 : 4307},${(rnd() * (up && k > 0.9 ? 99 : 30)).toFixed(1)},${foot},${cmp},${40 + (rnd() * 12 | 0)},${up && k > 0.85 ? 4 : up && k > 0.6 ? 2 : 1},${Math.round(up ? 5200 - 4700 * k : 4200)},${Math.round(up ? 600 + 4200 * k : 1500)},${Math.round(up ? 3900 * k * k : 1200)}`);
     }
     add('excel_memory_timeline.csv', M.join('\n') + '\n');
-    add('manifest.tsv', 'component\tstatus\tdetails\nsystem\tcomplete\tsystem, memory, sleep/wake, network state\noffice\tcomplete\tversions, Excel logs, AutoRecover, add-ins, preferences\nreports\tcomplete\tcrash, hang, spin and jetsam reports\nunified_logs\tcomplete\t1 day(s), 2026-03-10 through 2026-03-10\n');
+    add('manifest.tsv', 'component\tstatus\tdetails\nunified_log_tags\tcomplete\texcel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, permissions, storage, logs-dropped\nsystem\tcomplete\tsystem, memory, sleep/wake, network state\noffice\tcomplete\tversions, Excel logs, AutoRecover, add-ins, preferences\nreports\tcomplete\tcrash, hang, spin and jetsam reports\nunified_logs\tcomplete\t1 day(s), 2026-03-10 through 2026-03-10\n');
     add('collection.log', '[12:01:02] Excel diagnostics: collect (2026-03-10 through 2026-03-10) for user sample\n[12:01:02] System information\n[12:01:09] Unified logs (Excel, hangs/terminations, memory pressure), 2026-03-10 through 2026-03-10\n[12:03:40] Done.\n');
     add('summary.md', `# Excel diagnostics summary\n\nThis is made-up sample data that ships with the viewer. It tells one story: Excel's memory climbs for an hour and a half, a PivotTable filter pushes it over the limit, and Excel crashes at ${local(crash, 0)} local time and is relaunched.\n\n- Collected: 2026-03-10 12:03:40 EDT\n- Console user: sample\n- Mode: collect\n- Incident window: 2026-03-10 through 2026-03-10 (1 day(s))\n\n## Collection status\n\n| Component | Status | Details |\n| --- | --- | --- |\n| system | complete | system, memory, sleep/wake, network state |\n| office | complete | versions, Excel logs, AutoRecover, add-ins, preferences |\n| reports | complete | crash, hang, spin and jetsam reports |\n| unified_logs | complete | 1 day(s) |\n\n## Things to try\n\n1. Search for \`pivot\`, then press \`e\` to step through the errors.\n2. Drag across the spike in the histogram to zoom in on the crash.\n3. Open the Memory tab and click just before the drop.\n`);
     return files;

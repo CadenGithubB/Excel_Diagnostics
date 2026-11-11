@@ -238,34 +238,54 @@ printf 'component\tstatus\tdetails\n' > "$MANIFEST"
 
 # Everything Excel and its bundled helpers log; any process's message that names Excel (launchd exit
 # reasons, sandbox and privacy denials, RunningBoard, WindowServer, file providers); Microsoft crash
-# reporting and updates; why the Mac last shut down, logged at each startup; and system memory pressure. RunningBoard's whole-system state dumps are left
+# reporting and updates; why the Mac last shut down, logged at each startup; system memory pressure; and
+# any process failing a write because the disk is full. RunningBoard's whole-system state dumps are left
 # out: they name every running app and were a third of a day's output.
 PRED_ALL='process == "'"$EXCEL_PROC"'"
  OR processImagePath CONTAINS "/'"$EXCEL_PROC"'.app/"
  OR (eventMessage CONTAINS[c] "'"$EXCEL_NAME"'" AND NOT (process == "runningboardd" AND eventType == stateEvent))
  OR process IN {"spindump", "Microsoft Error Reporting", "Microsoft AutoUpdate", "Microsoft Update Assistant"}
  OR eventMessage CONTAINS[c] "previous shutdown cause"
+ OR eventMessage CONTAINS[c] "No space left on device"
  OR ((process == "ReportCrash" OR process == "osanalyticshelper") AND eventMessage CONTAINS[c] "jetsam")
  OR (process == "kernel" AND (eventMessage CONTAINS[c] "memorystatus" OR eventMessage CONTAINS[c] "jetsam" OR eventMessage CONTAINS[c] "compressor" OR eventMessage CONTAINS[c] "swap"))'
 
 # Unified-log entries are written one per row, tab-separated, with these columns. tags says why an
 # entry is relevant, mirroring PRED_ALL; line breaks and tabs inside a message appear as \n and \t.
+#
+# Two tags describe what a message says instead of who logged it. permissions: sandbox and privacy (TCC)
+# refusals, missing entitlements, "not permitted", "denied". storage: a full disk, an exceeded quota, I/O
+# errors, a read-only volume. Both look for refusals and failures, not the bare words, which are mostly
+# noise ("storage" is cookie stores and telemetry names). The viewer applies the same two patterns to
+# every log in a bundle, so keep them in step with CONTENT_TAGS in src/core.js.
+TAG_PERMISSIONS_RX='kTCCService|\bdeny\(|denied\b|\bforbidden\b|not permitted|not authori[sz]ed|unauthori[sz]ed|(unsatisfied|missing|requires|have|without) entitlement|\bEPERM\b|\bEACCES\b|NSCocoaErrorDomain Code=(257|513)\b'
+TAG_STORAGE_RX='no space left|\bENOSPC\b|(disk|volume|device) (is |was )?(almost |nearly )?full|\b(out of|low on|not enough|insufficient|low) (disk |free |storage )?space|quota exceeded|input/output error|\bI/O error|read-only file ?system|NSCocoaErrorDomain Code=(640|642)\b|NSPOSIXErrorDomain Code=(5|28|30|69)\b|0x800[37]0070\b'
 LABEL_HEADER=$'local_time\tutc_time\tlevel\tprocess\tpid\tsender\tsubsystem\tcategory\ttags\tmessage'
+# jq compiles a regex every time it is used, which tripled labeling time when both patterns ran on every
+# entry. A plain substring check picks the few entries worth testing first, so every alternative in the
+# patterns above needs a (lowercase) piece in the matching list below.
 LABEL_JQ='def basename: split("/") | last;
+def has_any($pieces): . as $s | any($pieces[]; . as $w | $s | contains($w));
 def utc: (capture("^(?<t>[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>[.][0-9]+)?(?<s>[+-])(?<h>[0-9]{2})(?<m>[0-9]{2})$")
     | ((.t | strptime("%Y-%m-%d %H:%M:%S") | mktime) - (if .s == "-" then -1 else 1 end) * ((.h | tonumber) * 3600 + (.m | tonumber) * 60))
         as $e | ($e | strftime("%Y-%m-%d %H:%M:%S")) + (.f // "")) // "";
 fromjson? | select(type == "object" and has("timestamp"))    # log show ends with a {"count":...} summary
 | (.processImagePath // "" | basename) as $p
 | (.eventMessage // "") as $m
+| ($m | ascii_downcase) as $l
 | [ if $p == $proc then "excel" else empty end,
     if $p != $proc and (.processImagePath // "" | contains("/" + $proc + ".app/")) then "excel-helper" else empty end,
     if $p == "Microsoft Error Reporting" or $p == "Microsoft AutoUpdate" or $p == "Microsoft Update Assistant" then "microsoft" else empty end,
     if $p == "spindump" then "hang-report" else empty end,
-    if $p != $proc and ($m | ascii_downcase | contains($name | ascii_downcase)) then "mentions-excel" else empty end,
+    if $p != $proc and ($l | contains($name | ascii_downcase)) then "mentions-excel" else empty end,
     if ($p == "kernel" and ($m | test("memorystatus|jetsam|compressor|swap"; "i")))
        or (($p == "ReportCrash" or $p == "osanalyticshelper") and ($m | test("jetsam"; "i"))) then "memory" else empty end,
-    if ($m | ascii_downcase | contains("previous shutdown cause")) then "restart" else empty end,
+    if ($l | contains("previous shutdown cause")) then "restart" else empty end,
+    if $p == "tccd" or .subsystem == "com.apple.TCC"
+       or (($l | has_any(["ktccservice", "deny(", "denied", "forbidden", "permitted", "authori", "entitlement", "eperm", "eacces", "errordomain code="]))
+           and ($m | test($perm; "i"))) then "permissions" else empty end,
+    if ($l | has_any(["space", "enospc", " full", "quota exceeded", "output error", "i/o error", "read-only file", "errordomain code=", "0070"]))
+       and ($m | test($stor; "i")) then "storage" else empty end,
     if .eventType == "lossEvent" then "logs-dropped" else empty end
   ] as $tags
 | [ .timestamp // "", (.timestamp // "" | utc), .messageType // .eventType // "", $p, (.processID // "" | tostring),
@@ -277,6 +297,9 @@ LOG_EXT=tsv
 
 note() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
 record_status() { printf '%s\t%s\t%s\n' "$1" "$2" "${3//$'\t'/ }" >> "$MANIFEST"; }
+# Tells the viewer that the tags column of the .tsv files already carries permissions and storage, so it
+# does not have to work them out again. Without jq the raw JSON lines have no tags and the viewer does it.
+[ "$LOG_EXT" = tsv ] && record_status "unified_log_tags" "complete" "excel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, permissions, storage, logs-dropped"
 
 # run_limited SECONDS CMD... - run CMD, stop it after SECONDS. Returns CMD's status, or 124 on timeout.
 run_limited() {
@@ -302,7 +325,8 @@ run_limited() {
 label_entries() {   # log --style ndjson on stdin -> labeled .tsv rows (or the JSON lines unchanged without jq)
     if [ -n "$JQ" ]; then
         printf '%s\n' "$LABEL_HEADER"
-        "$JQ" --unbuffered -R -r --arg proc "$EXCEL_PROC" --arg name "$EXCEL_NAME" "$LABEL_JQ"
+        "$JQ" --unbuffered -R -r --arg proc "$EXCEL_PROC" --arg name "$EXCEL_NAME" \
+            --arg perm "$TAG_PERMISSIONS_RX" --arg stor "$TAG_STORAGE_RX" "$LABEL_JQ"
     else
         cat
     fi
@@ -545,7 +569,7 @@ write_source_catalog() {
     catalog_line "System diagnostic reports" "/Library/Logs/DiagnosticReports" "reports/Library_Logs_DiagnosticReports" "Every macOS diagnostic report since the incident start (crashes, hangs, jetsam, shutdown stalls, resets, panics, resource limits), plus Excel-related ones from the last 30 days"
     catalog_line "Force-quit and usage records" "$USER_HOME/Library/Application Support/CrashReporter" "reports/CrashReporter" "Per-app crash and force-quit timestamps"
     local ulabel="Filtered unified logs" ustate="see unified_logs/collection_status.txt" udest="unified_logs/YYYY-MM-DD.$LOG_EXT"
-    local uformat="One entry per row, tab-separated with a header: local_time, utc_time (lines up with Excel's own logs), level (Default/Info/Debug/Error/Fault or event type), process, pid, sender (library that logged it), subsystem, category, tags (excel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, logs-dropped; empty when none apply), message (line breaks as \\n)"
+    local uformat="One entry per row, tab-separated with a header: local_time, utc_time (lines up with Excel's own logs), level (Default/Info/Debug/Error/Fault or event type), process, pid, sender (library that logged it), subsystem, category, tags (excel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, permissions, storage, logs-dropped; empty when none apply), message (line breaks as \\n)"
     if [ "$MODE" = repro ]; then
         ulabel="Live unified-log stream, all processes"; ustate="captured during the reproduction"; udest="repro/unified_live_unfiltered.$LOG_EXT"
     fi
@@ -933,7 +957,7 @@ write_summary() {
             echo '## Filtering unified logs'
             echo
             echo 'Unified-log `.tsv` files (`unified_logs/`, `unified_last30m.tsv`, `repro/unified_live_unfiltered.tsv`) have one entry per row and open as columns in Numbers or Excel.'
-            echo 'Filter on `level` (Error, Fault) and `tags`: `excel` (Excel itself), `excel-helper`, `microsoft` (error reporting, AutoUpdate), `hang-report`, `mentions-excel` (another process naming Excel), `memory`, `restart` (why the Mac last shut down), `logs-dropped`.'
+            echo 'Filter on `level` (Error, Fault) and `tags`: `excel` (Excel itself), `excel-helper`, `microsoft` (error reporting, AutoUpdate), `hang-report`, `mentions-excel` (another process naming Excel), `memory`, `restart` (why the Mac last shut down), `permissions` (sandbox and privacy refusals, "not permitted", "denied"), `storage` (full disk, quota, I/O errors), `logs-dropped`.'
             echo 'Use `utc_time` to line entries up with Excel'"'"'s own logs, which are in UTC. From Terminal, for example:'
             echo
             echo '    awk -F'"'"'\t'"'"' '"'"'$3 == "Error" || $3 == "Fault" || $9 ~ /excel/'"'"' unified_logs/*.tsv'
