@@ -879,8 +879,8 @@ const Core = (() => {
       for (let k = from + dir; k >= 0 && k < v.length; k += dir) if (sv[L[v[k]]] >= min) return k;
       return -1;
     }
-    async exportTsv(progress) {
-      const run = this.run, v = this.view, names = this.info([]).names, clean = (s) => String(s).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\r?\n/g, '\\n');
+    async exportTsv(progress, positions) {              // the current view, or just the given entries
+      const run = this.run, v = positions ? Uint32Array.from(positions) : this.view, names = this.info([]).names, clean = (s) => String(s).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\r?\n/g, '\\n');
       const parts = ['utc_time\tseverity\tlevel\tsource\tprocess\tpid\tsubsystem\tcategory\ttags\tmessage\n'];
       for (let start = 0; start < v.length; start += 2000) {
         if (run !== this.run) throw new Error('superseded');
@@ -1010,7 +1010,8 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
     row: ({ pos }) => ds.row(pos),
     seek: ({ t }) => ds.seek(t),
     findSev: ({ from, dir, min }) => ds.findSev(from, dir, min),
-    exportTsv: () => ds.exportTsv(progress),
+    exportTsv: ({ positions }) => ds.exportTsv(progress, positions),
+    fileBlob: ({ i }) => ds.entries[i].blob(),
     fileChunk: ({ i, offset, len }) => ds.fileChunk(i, offset, len),
   };
   self.onmessage = async (ev) => {

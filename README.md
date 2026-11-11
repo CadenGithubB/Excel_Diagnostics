@@ -9,6 +9,8 @@ Two pieces for chasing Microsoft Excel slowdowns, hangs and crashes on macOS:
 
 Open the page, then drop an `Excel_Diagnostics_….zip` on it. The unzipped folder or individual log files work too, and "Try it with sample data" loads a made-up bundle.
 
+No bundle yet? The page hands out the collector as well: "Download the script" on the start page, or File → Get the collector script once a bundle is open. "View it" shows the script and how to run it. The copy is built into the page, so it works offline and matches this repository as of the last build.
+
 **Nothing is uploaded.** The page has no server side. Its Content-Security-Policy sets `connect-src 'none'`, so the browser itself refuses any network request the page might make. You can save `index.html` and open it from disk with no connection.
 
 ### Timeline
@@ -33,7 +35,10 @@ What you can do:
 - **Filter** by severity, source, tag, process, subsystem, category and file from the list on the left. The count beside each value is what you would get by choosing it.
 - **Zoom in time** by dragging across the histogram, typing a start and end, or using the ± buttons on a selected entry.
 - **Step through errors** with `e` and `Shift+E`, **pin** entries with `p`, and press `c` to drop the filters while staying on the selected entry, so you can see what surrounded it.
-- **Export** the entries shown as a tab-separated file.
+- **Export** the entries shown, or just the pinned ones, as a tab-separated file.
+- **Save a view** from the File menu: the search, filters, time window and pins go into a small `.view.json` file that holds no log text. Load it later, or hand it to a colleague who has the same bundle, to land on the same entries.
+
+The File menu also opens another zip, folder or the sample data, saves a copy of whichever bundle file is open under Files (handy for pulling one crash report out of a zip), and closes the bundle.
 
 ### Other tabs
 
@@ -63,6 +68,8 @@ The page is assembled from `src/` by a small script. There are no dependencies.
 ```bash
 python3 build.py
 ```
+
+Rebuild after changing `excel_diagnostics.sh` too: the page carries a copy of it for the download button. `python3 build.py --check` fails if `index.html` is out of date.
 
 `src/core.js` does the indexing and searching in a Web Worker and can be run outside a browser. This loads a bundle with Deno and prints what was indexed, plus the results of a few searches:
 

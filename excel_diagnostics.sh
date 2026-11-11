@@ -68,6 +68,7 @@ JAMF=0
 MAX_DISCOVERED_MB=250                     # larger discovered log files are listed but not copied
 EXCEL_PROC=${EXCEL_PROCESS_NAME:-"Microsoft Excel"}   # override only for testing
 EXCEL_NAME=${EXCEL_PROC#Microsoft }        # "Excel": also matches "Microsoft Excel" and com.microsoft.Excel
+VIEWER_URL="https://cadengithubb.github.io/Excel_Diagnostics/"   # in-browser viewer for the collected bundle
 
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 
@@ -915,6 +916,10 @@ write_summary() {
         fi
         echo '3. `reports/`, `office/autorecover_inventory.txt`, and `office/excel_memory.txt` for direct evidence of crashes, recovery, and memory pressure.'
         echo '4. `source_catalog.tsv` for where each source came from, and `office/discovered_sources.tsv` for every other Microsoft log file found.'
+        echo
+        echo '## Searching these logs'
+        echo
+        echo "Open $VIEWER_URL and drop this folder or its .zip on the page. It merges every log here into one timeline that can be searched and filtered. The page works entirely in the browser: nothing is uploaded."
         if [ "$MODE" = collect ] && [ "$LOG_EXT" = tsv ]; then
             echo
             echo '## Restarts'
@@ -956,6 +961,7 @@ finalize() {
         chown -R "$CONSOLE_USER" "$OUT" "$OUT.zip" "$OUT.zip.sha256" 2>/dev/null
     fi
     note "Done. Send this file to IT: $OUT.zip (SHA-256: $OUT.zip.sha256)"
+    note "To search the logs, drop that zip on $VIEWER_URL (it reads them in the browser; nothing is uploaded)."
 }
 
 trap 'echo; [ "$MODE" = repro ] && repro_finish; note "Stopped - packaging what was collected so far."; kill $(jobs -p) 2>/dev/null; finalize; exit 130' INT TERM

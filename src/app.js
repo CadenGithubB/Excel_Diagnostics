@@ -120,6 +120,9 @@
     $('#bundleName').textContent = info.name;
     document.title = `${info.name} - Excel diagnostics viewer`;
     $('#detail').hidden = true;
+    openState = null;
+    $('#fileview').innerHTML = '<p class="dim">Choose a file. Files marked with a dot are on the timeline.</p>';
+    $('#treeFilter').value = '';
     const banner = $('#banner');
     banner.hidden = !info.focus;
     if (info.focus) $('#bannerText').textContent = `Showing the period covered by the macOS and Excel logs. Everything in the bundle runs from ${fmtTime(info.t0, false).slice(0, 10)} to ${fmtTime(info.t1, false).slice(0, 10)}.`;
@@ -194,7 +197,7 @@
   // ---------- facets ----------
   const FACETS = [['sev', 'Severity', 'level'], ['group', 'Source', 'source'], ['tag', 'Tag', 'tag'], ['proc', 'Process', 'process'],
     ['sub', 'Subsystem / area', 'subsystem'], ['cat', 'Category', 'category'], ['lvl', 'Original level', 'level'], ['file', 'File', 'file']];
-  const openFacets = new Set(['sev', 'group', 'tag', 'proc']);
+  const openFacets = new Set();                         // every group starts collapsed; a badge shows how many values are chosen
   function renderFacets() {
     let html = '';
     for (const [name, title, field] of FACETS) {
@@ -492,7 +495,7 @@
       for (let i = 0; i < parts.length - 1; i++) { if (!node.dirs.has(parts[i])) node.dirs.set(parts[i], { dirs: new Map(), files: [], count: 0 }); node = node.dirs.get(parts[i]); node.count++; }
       node.files.push(x);
     }
-    const html = (node, depth) => [...node.dirs].map(([name, d]) => `<details${depth < 1 && d.count <= 60 ? ' open' : ''}><summary>${esc(name)}<span class="n">${fmtN(d.count)}</span></summary>${html(d, depth + 1)}</details>`).join('') +
+    const html = (node, depth) => [...node.dirs].map(([name, d]) => `<details${depth < 1 && d.count <= 60 ? ' open' : ''}><summary>${esc(name)}<span class="n">${fmtN(d.count)}</span></summary><div class="kids">${html(d, depth + 1)}</div></details>`).join('') +
       node.files.map((x) => link(x, x.path.slice(x.path.lastIndexOf('/') + 1))).join('');
     el.innerHTML = html(root, 0);
   }
@@ -705,17 +708,143 @@
   $('#prevErr').addEventListener('click', () => nextSev(-1));
   $('#nextErr').addEventListener('click', () => nextSev(1));
   $('#pinnedOnly').addEventListener('click', () => { S.pinnedOnly = !S.pinnedOnly; updatePins(); schedule(); });
-  $('#export').addEventListener('click', async () => {
-    if (!view.count) return flash('Nothing to export');
+  function download(blob, name) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  }
+  async function exportEntries(positions) {             // the entries shown, or just the given ones (pins)
+    const n = positions ? positions.length : view.count;
+    if (!n) return flash('Nothing to export');
     try {
-      const blob = await call('exportTsv'), a = document.createElement('a');
-      a.href = URL.createObjectURL(blob); a.download = `${info.name}_filtered.tsv`; a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-      $('#searchbar').hidden = true;
-      $('#count').textContent = `${fmtN(view.count)} of ${fmtN(view.total)} entries`;
-      flash(`Exported ${fmtN(view.count)} entries`);
+      download(await call('exportTsv', { positions }), `${info.name}_${positions ? 'pinned' : 'filtered'}.tsv`);
+      flash(`Exported ${fmtN(n)} entries`);
     } catch (e) { if (e.message !== 'superseded') flash(e.message); }
+    $('#searchbar').hidden = true;
+    $('#count').textContent = `${fmtN(view.count)} of ${fmtN(view.total)} entries`;
+  }
+  $('#export').addEventListener('click', () => exportEntries(null));
+
+  // ---------- File menu ----------
+  function saveView() {                                 // search, filters, window and pins; no log text
+    const named = (name, ids) => ids.map((i) => info.names[name][i]);
+    const v = { app: 'excel-diagnostics-viewer', version: 1, saved: new Date().toISOString(), bundle: info.name, total: info.total,
+      text: S.text, matchCase: S.cs, timeZone: tzMode, from: S.t0, to: S.t1,
+      filters: Object.fromEntries(Object.entries(S.facets).filter(([, f]) => f.inc.length || f.exc.length).map(([n, f]) => [n, { show: named(n, f.inc), hide: named(n, f.exc) }])),
+      pins: [...pins.keys()].sort((a, b) => a - b), pinnedOnly: S.pinnedOnly, selected: selPos };
+    download(new Blob([JSON.stringify(v, null, 2)], { type: 'application/json' }), `${info.name}.view.json`);
+    flash('View saved');
+  }
+  function applyView(v) {
+    if (!v || v.app !== 'excel-diagnostics-viewer') return flash('That file is not a saved view');
+    const same = v.bundle === info.name && v.total === info.total;      // pins point at entries by position, so only for the same bundle
+    S.text = String(v.text || ''); S.cs = !!v.matchCase;
+    $('#q').value = S.text; $('#caseSens').checked = S.cs;
+    S.facets = {};
+    for (const [name, sel] of Object.entries(v.filters || {})) {
+      const names = info.names[name];
+      if (!names || !sel) continue;
+      const ids = (list) => (Array.isArray(list) ? list : []).map((x) => names.indexOf(x)).filter((i) => i >= 0);
+      const f = { inc: ids(sel.show), exc: ids(sel.hide) };
+      if (f.inc.length || f.exc.length) S.facets[name] = f;
+    }
+    S.t0 = typeof v.from === 'number' ? v.from : null; S.t1 = typeof v.to === 'number' ? v.to : null;
+    if (['bundle', 'utc', 'browser'].includes(v.timeZone)) { tzMode = v.timeZone; $('#tz').value = tzMode; renderOverview(); }
+    pins.clear();
+    if (same && Array.isArray(v.pins)) for (const p of v.pins) if (Number.isInteger(p) && p >= 0 && p < info.total) pins.set(p, true);
+    S.pinnedOnly = !!v.pinnedOnly && pins.size > 0;
+    selPos = same && Number.isInteger(v.selected) ? v.selected : null;
+    updatePins();
+    $('#banner').hidden = true; $('#detail').hidden = true;
+    showTab('timeline');
+    schedule();
+    flash(same ? 'View loaded' : `View loaded without its pins: it was saved from ${v.bundle}`);
+  }
+  $('#pickView').addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    try { applyView(JSON.parse(await f.text())); } catch (err) { flash('That file is not a saved view'); }
   });
+  function closeBundle() {
+    if (worker) worker.terminate();
+    worker = null; info = null;
+    setTimeout(sweepTemp, 600);
+    $('#app').hidden = true; $('#landing').hidden = false;
+    document.title = 'Excel diagnostics viewer';
+  }
+  const fileBtn = $('#fileBtn'), menuList = $('#fileMenu .menulist');
+  const menuItem = (cmd) => $(`[data-cmd="${cmd}"]`, menuList);
+  function showMenu(open) {
+    if (open) {                                         // say what each item would act on right now
+      const openFileShown = currentTab() === 'files' && openState ? info.files[openState.i] : null;
+      menuItem('export').disabled = !view.count;
+      menuItem('export').lastElementChild.textContent = `${fmtN(view.count)} as .tsv`;
+      menuItem('exportPins').disabled = !pins.size;
+      menuItem('exportPins').lastElementChild.textContent = pins.size ? `${fmtN(pins.size)} as .tsv` : 'none pinned';
+      menuItem('saveFile').disabled = !openFileShown;
+      menuItem('saveFile').lastElementChild.textContent = openFileShown ? openFileShown.path.slice(openFileShown.path.lastIndexOf('/') + 1) : 'open one under Files';
+    }
+    menuList.hidden = !open;
+    fileBtn.setAttribute('aria-expanded', String(open));
+    if (open) menuList.querySelector('button:not(:disabled)').focus();
+  }
+  fileBtn.addEventListener('click', () => showMenu(menuList.hidden));
+  document.addEventListener('pointerdown', (e) => { if (!menuList.hidden && !e.target.closest('#fileMenu')) showMenu(false); });
+  menuList.addEventListener('keydown', (e) => {
+    const items = [...menuList.querySelectorAll('button:not(:disabled)')], at = items.indexOf(document.activeElement);
+    if (e.key === 'Escape') { showMenu(false); fileBtn.focus(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); items[(at + 1) % items.length].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(at - 1 + items.length) % items.length].focus(); }
+  });
+  menuList.addEventListener('click', async (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    showMenu(false);
+    switch (b.dataset.cmd) {
+      case 'open': $('#pickFiles').click(); break;
+      case 'openDir': $('#pickDir').click(); break;
+      case 'sample': start(null, true); break;
+      case 'saveView': saveView(); break;
+      case 'loadView': $('#pickView').click(); break;
+      case 'export': exportEntries(null); break;
+      case 'exportPins': exportEntries([...pins.keys()].sort((x, y) => x - y)); break;
+      case 'saveFile': {
+        const f = info.files[openState.i];
+        try { download(await call('fileBlob', { i: f.i }), f.path.slice(f.path.lastIndexOf('/') + 1)); } catch (err) { flash(err.message); }
+        break;
+      }
+      case 'script': showScript(); break;
+      case 'close': closeBundle(); break;
+    }
+  });
+
+  // ---------- the collector script: the page carries a copy, so this works offline and asks no server ----------
+  const scriptSource = () => $('#collector-src').textContent;
+  const downloadScript = () => download(new Blob([scriptSource()], { type: 'text/x-shellscript' }), 'excel_diagnostics.sh');
+  function showScript() {
+    const pre = $('#scriptText');
+    if (!pre.firstChild) {
+      const t = scriptSource();
+      pre.textContent = t;
+      $('#scriptMeta').textContent = `${fmtN(t.split('\n').length - 1)} lines, ${Math.round(t.length / 1024)} KB`;
+    }
+    $('#scriptDlg').showModal();
+    pre.scrollTop = 0;
+  }
+  const blip = (b, text) => {                           // a flash would sit behind the dialog, so the button answers instead
+    if (!b.dataset.label) b.dataset.label = b.textContent;
+    b.textContent = text;
+    clearTimeout(b.t); b.t = setTimeout(() => { b.textContent = b.dataset.label; }, 1600);
+  };
+  $('#btnScript').addEventListener('click', () => { downloadScript(); flash('Downloading excel_diagnostics.sh'); });
+  $('#btnScriptView').addEventListener('click', showScript);
+  $('#scriptSave').addEventListener('click', (e) => { downloadScript(); blip(e.currentTarget, 'Saved'); });
+  $('#scriptCopy').addEventListener('click', (e) => {
+    const b = e.currentTarget;
+    (navigator.clipboard ? navigator.clipboard.writeText(scriptSource()) : Promise.reject()).then(() => blip(b, 'Copied'), () => blip(b, 'Blocked'));
+  });
+  $('#scriptClose').addEventListener('click', () => $('#scriptDlg').close());
   $('#help').addEventListener('click', () => $('#helpDlg').showModal());
   $('#facets').addEventListener('click', (e) => {
     const fv = e.target.closest('.fv');
@@ -742,11 +871,12 @@
   document.querySelector('.tabs').addEventListener('click', (e) => { if (e.target.dataset.tab) showTab(e.target.dataset.tab); });
   $('#tree').addEventListener('click', (e) => { const a = e.target.closest('a'); if (a) openFile(+a.dataset.i); });
   $('#treeFilter').addEventListener('input', (e) => buildTree(e.target.value));
-  $('#openAnother').addEventListener('click', () => { if (worker) worker.terminate(); worker = null; info = null; setTimeout(sweepTemp, 600); $('#app').hidden = true; $('#landing').hidden = false; document.title = 'Excel diagnostics viewer'; });
-  new ResizeObserver(() => { if (!info || $('#app').hidden) return; if (currentTab() === 'timeline') { layout(); setTop(topRow); clearTimeout(drawHist.t); drawHist.t = setTimeout(() => { if (view.hist && Math.abs(clamp(Math.floor($('#hist').clientWidth / 8), 30, 240) - view.hist.nb) > 8) schedule(); else drawHist(); }, 150); } else if (currentTab() === 'memory') drawMemory(); }).observe(document.body);
+  const resized = new ResizeObserver(() => { if (!info || $('#app').hidden) return; if (currentTab() === 'timeline') { layout(); setTop(topRow); clearTimeout(drawHist.t); drawHist.t = setTimeout(() => { if (view.hist && Math.abs(clamp(Math.floor($('#hist').clientWidth / 8), 30, 240) - view.hist.nb) > 8) schedule(); else drawHist(); }, 150); } else if (currentTab() === 'memory') drawMemory(); });
+  resized.observe(document.body);
+  resized.observe($('#hist'));                          // its width also changes when the filter menu is shown or hidden
 
   document.addEventListener('keydown', (e) => {
-    if (!info || $('#app').hidden || e.metaKey || e.ctrlKey || e.altKey || $('#helpDlg').open) return;
+    if (!info || $('#app').hidden || e.metaKey || e.ctrlKey || e.altKey || document.querySelector('dialog[open]') || !$('#fileMenu .menulist').hidden) return;
     if (e.target.matches && e.target.matches('input, textarea, select')) { if (e.key === 'Escape') e.target.blur(); return; }
     if (currentTab() !== 'timeline') return;
     const page = visibleRows() - 1;

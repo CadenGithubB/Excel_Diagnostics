@@ -29,6 +29,13 @@
       <input type="file" id="pickFiles" multiple hidden>
       <input type="file" id="pickDir" webkitdirectory hidden>
     </div>
+    <div class="getscript">
+      <div><b>Nothing to open yet?</b> <span class="dim">Run <code>excel_diagnostics.sh</code> on the Mac where Excel is misbehaving. It makes the zip this page reads.</span></div>
+      <div class="acts">
+        <button id="btnScript">Download the script</button>
+        <button id="btnScriptView">View it</button>
+      </div>
+    </div>
     <ul class="facts">
       <li><b>Nothing is uploaded.</b> The page has no server side, and its security policy blocks every network request, so it could not send the logs anywhere. You can save this page and use it offline.</li>
       <li><b>One timeline.</b> The macOS unified log, Excel's own diagnostics, AutoUpdate, OneDrive, install history, sleep and wake, and each crash or hang report are merged by time and shown in the Mac's own time zone.</li>
@@ -46,6 +53,26 @@
 <div id="app" hidden>
   <header class="top">
     <span class="brand">Excel diagnostics viewer</span>
+    <div class="menu" id="fileMenu">
+      <button id="fileBtn" aria-haspopup="menu" aria-expanded="false">File ▾</button>
+      <div class="menulist" role="menu" aria-label="File" hidden>
+        <button role="menuitem" data-cmd="open">Open zip or log files…</button>
+        <button role="menuitem" data-cmd="openDir">Open folder…</button>
+        <button role="menuitem" data-cmd="sample">Open sample data</button>
+        <hr>
+        <button role="menuitem" data-cmd="saveView" title="Save the search, filters, time window and pins to a small file. It holds no log text.">Save view…</button>
+        <button role="menuitem" data-cmd="loadView" title="Apply a saved view to the bundle that is open">Load view…</button>
+        <hr>
+        <button role="menuitem" data-cmd="export"><span>Export shown entries</span><small></small></button>
+        <button role="menuitem" data-cmd="exportPins"><span>Export pinned entries</span><small></small></button>
+        <button role="menuitem" data-cmd="saveFile"><span>Save a copy of the open file</span><small></small></button>
+        <hr>
+        <button role="menuitem" data-cmd="script" title="Download or read excel_diagnostics.sh, the script that collects these bundles">Get the collector script…</button>
+        <hr>
+        <button role="menuitem" data-cmd="close">Close bundle</button>
+      </div>
+      <input type="file" id="pickView" accept=".json,application/json" hidden>
+    </div>
     <span id="bundleName"></span>
     <nav class="tabs" aria-label="Views">
       <button data-tab="timeline" class="on">Timeline</button>
@@ -61,10 +88,14 @@
         <option value="browser">this computer's time zone</option>
       </select>
     </label>
-    <button id="openAnother">Open another</button>
   </header>
 
   <section id="tab-timeline">
+    <aside id="side" aria-label="Filters">
+      <div class="sidehead"><span>Filters</span><button id="clear" title="Remove the search text and every filter (C)" disabled>Clear all</button></div>
+      <div id="facets"></div>
+    </aside>
+    <div class="tl">
     <div class="toolbar">
       <button id="facetToggle" title="Show or hide the filter list" aria-label="Show or hide the filter list">☰</button>
       <input id="q" type="search" spellcheck="false" autocomplete="off" aria-label="Search" placeholder='Search: words, "a phrase", /regex/, -exclude, process:excel, level:error'>
@@ -76,7 +107,6 @@
       <button id="nextErr" title="Next error or fault (E)">↓ Error</button>
       <button id="pinnedOnly" title="Show only pinned entries" disabled>★ Pinned (0)</button>
       <button id="export" title="Download the entries shown as a tab-separated file">Export</button>
-      <button id="clear" title="Remove the search text and every filter (C)" disabled>Clear filters</button>
       <div id="searchbar" hidden><div></div></div>
     </div>
     <div id="banner" hidden><span id="bannerText"></span><button id="bannerAll">Show all time</button><span class="spacer"></span><button id="bannerClose" aria-label="Dismiss">✕</button></div>
@@ -84,7 +114,7 @@
       <div class="histhead">
         <span><i class="be"></i>Errors and faults</span><span><i class="bw"></i>Warnings</span><span><i class="bo"></i>Everything else</span>
         <span class="spacer"></span>
-        <span class="dim">Drag across the chart to zoom</span>
+        <span class="dim">Drag on the chart to zoom</span>
         <input id="tFrom" type="text" aria-label="Window start" spellcheck="false">
         <span>to</span>
         <input id="tTo" type="text" aria-label="Window end" spellcheck="false">
@@ -96,7 +126,6 @@
       <div id="histTip" hidden></div>
     </div>
     <div class="main">
-      <aside id="facets" aria-label="Filters"></aside>
       <div class="tablewrap">
         <div class="thead"><span>Time</span><span>Severity</span><span>Source</span><span>Process</span><span>Message</span></div>
         <div id="vs" tabindex="0" aria-label="Log entries"><div id="rows"></div><div id="spacer"></div></div>
@@ -104,6 +133,7 @@
         <div id="noRows" hidden>No timestamped logs were found in this bundle. Its files are listed under Files.</div>
         <div id="detail" hidden></div>
       </div>
+    </div>
     </div>
   </section>
 
@@ -142,6 +172,25 @@
   <form method="dialog" style="text-align:right;margin-top:14px"><button class="primary">Close</button></form>
 </dialog>
 
+<dialog id="scriptDlg" aria-labelledby="scriptTitle">
+  <h2 id="scriptTitle">excel_diagnostics.sh</h2>
+  <p>The collector. Run it on the Mac where Excel is slow, hanging or crashing. It gathers Excel's logs, crash and hang reports and the macOS log into an <code>Excel_Diagnostics_….zip</code> on the Desktop, which is what this page reads.</p>
+  <p>In Terminal, with the script saved to Downloads:</p>
+  <pre class="cmd">sudo bash ~/Downloads/excel_diagnostics.sh</pre>
+  <p class="dim">It asks what to collect before it starts. Add <code>--help</code> to see every mode and option.</p>
+  <div class="scriptacts">
+    <button class="primary" id="scriptSave">Download</button>
+    <button id="scriptCopy">Copy</button>
+    <a href="https://github.com/CadenGithubB/Excel_Diagnostics/blob/main/excel_diagnostics.sh" target="_blank" rel="noopener noreferrer">History on GitHub ↗</a>
+    <span class="spacer"></span>
+    <span class="dim" id="scriptMeta"></span>
+    <button id="scriptClose">Close</button>
+  </div>
+  <pre id="scriptText" tabindex="0" aria-label="The script"></pre>
+  <p class="dim fine">This copy is part of the page, so it downloads without a connection.</p>
+</dialog>
+
+<script id="collector-src" type="text/plain">/*COLLECTOR*/</script>
 <script id="core-src" type="text/plain">
 /*CORE*/
 </script>
