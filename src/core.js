@@ -447,7 +447,7 @@ const Core = (() => {
   class Dataset {
     constructor() {
       this.dict = { lvl: new Dict(250), proc: new Dict(65000), sub: new Dict(65000), cat: new Dict(65000) };
-      this.tagNames = []; this.zone = []; this.entries = []; this.sources = [];
+      this.tagNames = []; this.zone = []; this.entries = []; this.sources = []; this.reportList = [];
       this.run = 0; this.textCache = null; this.view = new Uint32Array(0); this.lastBlob = null;
     }
     tagId(name) {
@@ -579,7 +579,11 @@ const Core = (() => {
 
     async addReports() {                                // crash, hang and diagnostic reports become timeline events
       const lines = [];
-      const add = (t, kind, proc, path, what) => { if (t === t) lines.push(`${stamp(t)}\t${kind}\t${proc}\t${path}\t${what.replace(/[\t\r\n]+/g, ' ')}`); };
+      const add = (t, kind, proc, path, what) => {
+        if (t !== t) return;
+        lines.push(`${stamp(t)}\t${kind}\t${proc}\t${path}\t${what.replace(/[\t\r\n]+/g, ' ')}`);
+        this.reportList.push({ t, kind, proc, path });   // also handed to the page, which marks them on the memory charts
+      };
       for (const en of this.entries) {
         const ext = (/\.(ips|crash|diag|hang|spin|panic|shutdownstall)$/i.exec(en.path) || [0, ''])[1].toLowerCase();
         const file = basename(en.path);
@@ -707,8 +711,17 @@ const Core = (() => {
         files: this.entries.map((en, i) => { const s = srcOf.get(en); return { i, path: en.path, size: en.size, src: s ? s.id : -1, rows: s ? s.n : 0 }; }),
         sources: this.sources.map((s) => ({ id: s.id, path: s.path, kind: s.parser.kind, group: s.parser.group, short: s.parser.short, rows: s.n, t0: s.t0, t1: s.t1, size: s.entry.size, virtual: !!s.entry.virtual })),
         names: { sev: SEV, group: this.groups, tag: this.tagNames, proc: D.proc.names, sub: D.sub.names, cat: D.cat.names, lvl: D.lvl.names, file: this.sources.map((s) => s.path) },
-        lvlSev: Array.from(this.lvlSev),
+        lvlSev: Array.from(this.lvlSev), reports: this.reportList,
       };
+    }
+    tagTimes(name, nb) {                                // when entries carrying a tag occur: counts per time bin across their own span
+      const G = this.g, bit = this.tagNames.indexOf(name), bins = new Array(nb).fill(0);
+      let first = -1, last = -1, total = 0;
+      if (bit >= 0) for (let i = 0; i < G.n; i++) if ((G.G[i] >> bit) & 1) { if (first < 0) first = i; last = i; total++; }
+      if (!total) return { total: 0, t0: 0, t1: 0, nb, bins };
+      const t0 = G.T[first], t1 = Math.max(G.T[last], t0 + 1000), scale = nb / (t1 - t0);
+      for (let i = first; i <= last; i++) if ((G.G[i] >> bit) & 1) bins[Math.min(nb - 1, Math.floor((G.T[i] - t0) * scale))]++;
+      return { total, t0, t1, nb, bins };
     }
 
     // ----- search -----
@@ -1032,6 +1045,28 @@ const Core = (() => {
       `{"app_name":"Microsoft Excel","timestamp":"${local(crash, 0)}.00 -0400","app_version":"16.114","bug_type":"309","os_version":"macOS 15.7.8 (24G824)","name":"Microsoft Excel"}\n{\n  "exception" : {"type":"EXC_BAD_ACCESS","signal":"SIGSEGV","subtype":"KERN_INVALID_ADDRESS at 0x0000000000000018"},\n  "faultingThread" : 0,\n  "threads" : [{"triggered":true,"frames":[{"symbol":"PivotFilterApply","imageIndex":0},{"symbol":"PivotTableUpdate","imageIndex":0}]}]\n}\n`);
     add('reports/crash_summary.txt', `# Crash and hang report summary\n\n## reports/user_Library_Logs_DiagnosticReports/Microsoft Excel-2026-03-10-103500.ips\n"procName":"Microsoft Excel"\n"exception":"EXC_BAD_ACCESS"\n`);
 
+    const procs = [['Microsoft Excel', 4307, 688, 141], ['WindowServer', 388, 512, 96], ['Browser Helper (Renderer)', 2110, 474, 310], ['Chat Helper (Renderer)', 1532, 431, 288], ['Mail', 911, 302, 120],
+      ['Browser', 2101, 260, 88], ['Finder', 640, 148, 61], ['OneDrive', 1145, 96, 58], ['Dock', 633, 71, 30], ['Spotlight', 702, 64, 22], ['Notes', 1290, 58, 19], ['Terminal', 3320, 44, 8]];
+    const snapAt = base + span + 220e3;
+    add('system/system_info.txt', '=== Hardware ===\nHardware:\n\n    Hardware Overview:\n\n      Model Name: MacBook Pro\n      Chip: Apple M1 Pro\n      Total Number of Cores: 10\n      Memory: 16 GB\n');
+    add('system/memory.txt', `=== ${new Date(snapAt + om * 60000).toUTCString().slice(0, 25)} EDT 2026 / ${stamp(snapAt, 0)} UTC ===\nMemory pressure level (1=normal 2=warning 4=critical): 1\nSwap: total = 2048.00M  used = 1200.00M  free = 848.00M  (encrypted)\n` +
+      '--- top processes by memory (MEM = physical footprint, CMPRS = compressed)\nProcesses: 512 total, 3 running, 509 sleeping, 2890 threads \nPhysMem: 11G used (2100M wired, 1500M compressor), 4200M unused.\n\nPID    COMMAND          MEM  CMPRS %CPU #TH \n' +
+      procs.map(([n, p, m, c]) => `${String(p).padEnd(6)} ${n.slice(0, 16).padEnd(16)} ${(m + 'M').padEnd(4)} ${(c + 'M').padEnd(5)} ${(rnd() * 9).toFixed(1).padEnd(4)} ${12 + (rnd() * 40 | 0)}  `).join('\n') +
+      '\n--- vm_stat\nMach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                              268800.\nPages active:                            310021.\n--- memory_pressure\nThe system has 17179869184 (1048576 pages with a page size of 16384).\n\n');
+    const fcats = [['MALLOC_SMALL', 212, 41], ['MALLOC_NANO', 148, 3], ['MALLOC_MEDIUM', 96, 12], ['IOSurface', 88, 164], ['MALLOC_TINY', 51, 80], ['MALLOC_LARGE', 34, 5], ['CoreAnimation', 18, 733], ['CG raster data', 14, 402],
+      ['__DATA', 11, 1040], ['untagged (VM_ALLOCATE)', 7, 120], ['CoreUI image data', 4, 61], ['stack', 2, 46], ['page table', 2, 1], ['ColorSync', 1, 38]];
+    add('office/excel_footprint.txt', '======================================================================\nMicrosoft Excel [4307]: 64-bit    Footprint: 688 MB (16384 bytes per page)\n======================================================================\n\n' +
+      '  Dirty      Clean  Reclaimable    Regions    Category\n    ---        ---          ---        ---    ---\n' + fcats.map(([c, mb, rg]) => `${String(mb).padStart(4)} MB        0 B          0 B ${String(rg).padStart(10)}    ${c}`).join('\n') +
+      '\n    ---        ---          ---        ---    ---\n 688 MB        0 B          0 B       2746    TOTAL\n');
+    const jetAt = crash - 150e3, pg = (mb) => Math.round(mb * 64);   // 16 KB pages
+    add(`reports/Library_Logs_DiagnosticReports/JetsamEvent-${local(jetAt, 0).slice(0, 10)}-${local(jetAt, 0).slice(11).replace(/:/g, '')}.ips`,
+      `{"bug_type":"298","timestamp":"${local(jetAt, 0)}.00 -0400","os_version":"macOS 15.7.8 (24G824)","roots_installed":0,"incident_id":"SAMPLE"}\n` + JSON.stringify({ build: 'macOS 15.7.8 (24G824)', product: 'MacBookPro18,1', date: `${local(jetAt, 0)}.00 -0400`, bug_type: '298',
+        memoryStatus: { compressorSize: pg(4650), pageSize: 16384, memoryPages: { active: pg(5200), inactive: pg(2900), wired: pg(2300), free: pg(96), purgeable: pg(12), speculative: pg(40) } }, largestProcess: 'Microsoft Excel',
+        processes: [{ name: 'Microsoft Excel', pid: 4121, rpages: pg(5980), lifetimeMax: pg(6102), states: ['frontmost'] }, { name: 'Browser Helper (Renderer)', pid: 2110, rpages: pg(612), lifetimeMax: pg(905), states: ['suspended'], reason: 'vm-pageshortage' },
+          { name: 'Chat Helper (Renderer)', pid: 1532, rpages: pg(540), lifetimeMax: pg(760), states: ['suspended'], reason: 'vm-pageshortage' }, { name: 'WindowServer', pid: 388, rpages: pg(498), lifetimeMax: pg(540), states: ['daemon'] },
+          { name: 'Mail', pid: 911, rpages: pg(288), lifetimeMax: pg(410), states: ['idle'] }, { name: 'Finder', pid: 640, rpages: pg(140), lifetimeMax: pg(190), states: ['idle'] }, { name: 'Notes', pid: 1290, rpages: pg(52), lifetimeMax: pg(80), states: ['idle'], reason: 'per-process-limit' },
+          { name: 'Spotlight', pid: 702, rpages: pg(60), lifetimeMax: pg(75), states: ['daemon'] }, { name: 'Dock', pid: 633, rpages: pg(66), lifetimeMax: pg(90), states: ['daemon'] }] }, null, 1) + '\n');
+
     const M = ['local_time,utc_time,excel_pid,excel_cpu_pct,excel_footprint_mb,excel_compressed_mb,excel_threads,pressure_level,free_mb,compressor_mb,swap_used_mb'];
     for (let t = base; t < base + span; t += 30e3) {
       const up = t < crash, k = up ? (t - base) / (crash - base) : (t - relaunch) / span;
@@ -1063,6 +1098,7 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
     exportTsv: ({ positions }) => ds.exportTsv(progress, positions),
     fileBlob: ({ i }) => ds.entries[i].blob(),
     fileChunk: ({ i, offset, len }) => ds.fileChunk(i, offset, len),
+    tagTimes: ({ tag, bins }) => ds.tagTimes(tag, bins),
   };
   self.onmessage = async (ev) => {
     const { id, op, args } = ev.data;

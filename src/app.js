@@ -126,12 +126,13 @@
     const banner = $('#banner');
     banner.hidden = !info.focus;
     if (info.focus) $('#bannerText').textContent = `Showing the period covered by the macOS and Excel logs. Everything in the bundle runs from ${fmtTime(info.t0, false).slice(0, 10)} to ${fmtTime(info.t1, false).slice(0, 10)}.`;
-    const mem = info.files.find((f) => /(^|\/)excel_memory_timeline\.csv$/.test(f.path));
-    $('[data-tab="memory"]').hidden = !mem;
+    mem = null; memDrawn = '';
+    const memTab = hasMemory();
+    $('[data-tab="memory"]').hidden = !memTab;
     buildTree(''); renderOverview(); updatePins();
     showTab(info.total ? 'timeline' : 'files');
     $('#noRows').hidden = !!info.total;
-    if (mem) loadMemory(mem);
+    if (memTab) loadMemory();
     runQuery();
   }
 
@@ -536,7 +537,7 @@
       for (let i = 0; i < parts.length - 1; i++) { if (!node.dirs.has(parts[i])) node.dirs.set(parts[i], { dirs: new Map(), files: [], count: 0 }); node = node.dirs.get(parts[i]); node.count++; }
       node.files.push(x);
     }
-    const html = (node, depth) => [...node.dirs].map(([name, d]) => `<details${depth < 1 && d.count <= 60 ? ' open' : ''}><summary>${esc(name)}<span class="n">${fmtN(d.count)}</span></summary><div class="kids">${html(d, depth + 1)}</div></details>`).join('') +
+    const html = (node, depth) => [...node.dirs].map(([name, d]) => `<details${depth < 1 && d.count <= 60 ? ' open' : ''}><summary>${esc(name)}<span class="cnt" title="${fmtN(d.count)} ${d.count === 1 ? 'file' : 'files'} in this folder">(${fmtN(d.count)})</span></summary><div class="kids">${html(d, depth + 1)}</div></details>`).join('') +
       node.files.map((x) => link(x, x.path.slice(x.path.lastIndexOf('/') + 1))).join('');
     el.innerHTML = html(root, 0);
   }
@@ -660,77 +661,278 @@
     if (e.target.dataset.src) { S.facets = { file: { inc: [+e.target.dataset.src], exc: [] } }; S.text = ''; $('#q').value = ''; S.t0 = S.t1 = null; showTab('timeline'); schedule(); }
   });
 
-  // ---------- memory tab (watch / repro modes write excel_memory_timeline.csv) ----------
-  let mem = null;
-  async function loadMemory(f) {
-    const gen = info, got = await call('fileChunk', { i: f.i, offset: 0, len: 16 << 20 });
-    if (info !== gen) return;
-    const lines = new TextDecoder().decode(got.bytes).split(/\r?\n/).filter(Boolean), head = lines[0].split(','), col = (n) => head.indexOf(n);
-    const rows = lines.slice(1).map((l) => l.split(','));
-    const num = (n) => rows.map((r) => (r[col(n)] === '' || r[col(n)] == null ? NaN : +r[col(n)]));
-    mem = { file: f, t: rows.map((r) => { const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)/.exec(r[col('utc_time')] || ''); return m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : NaN; }),
-      pid: rows.map((r) => r[col('excel_pid')] || ''), foot: num('excel_footprint_mb'), cmp: num('excel_compressed_mb'), cpu: num('excel_cpu_pct'),
+  // ---------- memory ----------
+  // Everything the bundle holds about memory, laid out as it was recorded. This page reports figures and marks when
+  // things happened; it draws no conclusions, so the person reading can make their own.
+  let mem = null, memDrawn = '';
+  const PRESSURE = { 1: 'normal', 2: 'warning', 4: 'critical' };
+  const toMB = (v) => { const m = /^([\d.]+)\s*([BKMGT])/i.exec(String(v).trim()); return m ? +m[1] * { B: 1 / 1048576, K: 1 / 1024, M: 1, G: 1024, T: 1048576 }[m[2].toUpperCase()] : NaN; };
+  const fmtMB = (v) => (v !== v ? '' : v >= 10 ? `${fmtN(Math.round(v))} MB` : `${v.toFixed(1)} MB`);
+  const memFiles = (rx) => info.files.filter((f) => f.size && rx.test(f.path));
+  const hasMemory = () => memFiles(/(^|\/)(excel_memory_timeline\.csv|memory\.txt|system_memory\.txt|memory_snapshots\.txt|excel_footprint\.txt)$/).length > 0 ||
+    info.reports.some((r) => r.kind === 'Jetsam') || info.names.tag.includes('memory');
+  const readText = async (f, cap) => new TextDecoder().decode((await call('fileChunk', { i: f.i, offset: 0, len: Math.min(f.size, cap) })).bytes);
+
+  function parseTimeline(file, text) {                  // excel_memory_timeline.csv from watch and repro modes
+    const lines = text.split(/\r?\n/).filter(Boolean), head = lines[0].split(','), rows = lines.slice(1).map((l) => l.split(','));
+    const col = (n) => head.indexOf(n), num = (n) => rows.map((r) => (r[col(n)] === '' || r[col(n)] == null ? NaN : +r[col(n)]));
+    return { file, t: rows.map((r) => { const m = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)/.exec(r[col('utc_time')] || ''); return m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : NaN; }),
+      pid: rows.map((r) => r[col('excel_pid')] || ''), foot: num('excel_footprint_mb'), cmp: num('excel_compressed_mb'), cpu: num('excel_cpu_pct'), threads: num('excel_threads'),
       level: num('pressure_level'), free: num('free_mb'), comp: num('compressor_mb'), swap: num('swap_used_mb') };
+  }
+  function parseSnapshots(file, text) {                 // each "=== local / UTC ===" block the collector wrote with snapshot_memory
+    const out = [], parts = text.split(/^=== .*?\/ (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) UTC ===$/m);
+    for (let k = 1; k + 1 < parts.length; k += 2) {
+      const body = parts[k + 1], t = Date.parse(parts[k].replace(' ', 'T') + 'Z'), procs = [];
+      const table = /^PID\s+COMMAND.*$/m.exec(body);
+      if (table) {
+        for (const line of body.slice(table.index + table[0].length).split('\n').slice(1)) {
+          const m = /^(\d+)\s+(.*?)\s+(\d[\d.]*[BKMGT])[+-]?\s+(\d[\d.]*[BKMGT])[+-]?\s+[\d.]+\s+\d+/.exec(line);
+          if (!m) { if (procs.length) break; continue; }
+          procs.push({ pid: +m[1], name: m[2], mb: toMB(m[3]), cmp: toMB(m[4]) });
+        }
+      }
+      out.push({ file, t, level: +((/^Memory pressure level[^:]*:\s*(\d+)/m.exec(body) || [])[1] || NaN), swap: toMB((/^Swap:.*?used = ([\d.]+[BKMGT])/m.exec(body) || [0, ''])[1]),
+        phys: (/^PhysMem:\s*(.+?)\s*$/m.exec(body) || [0, ''])[1], ram: +((/^The system has (\d+) \(/m.exec(body) || [])[1] || NaN) / 1048576, procs });
+    }
+    return out;
+  }
+  function parseFootprint(file, text) {                 // `footprint -p` for Excel: its memory by kind
+    const head = /^(.+?) \[(\d+)\]:.*?Footprint:\s*([\d.]+ ?[KMGT]?B)/m.exec(text), rows = [];
+    for (const line of text.split('\n')) {
+      const m = /^\s*([\d.]+ ?[KMGT]?B)\s+([\d.]+ ?[KMGT]?B)\s+([\d.]+ ?[KMGT]?B)\s+(\d+)\s+(\S.*?)\s*$/.exec(line);
+      if (m && m[5] !== 'TOTAL') rows.push({ name: m[5], mb: toMB(m[1]), clean: toMB(m[2]), regions: +m[4] });
+    }
+    return head && rows.length ? { file, proc: head[1], pid: +head[2], total: toMB(head[3]), rows: rows.sort((a, b) => b.mb - a.mb) } : null;
+  }
+  function parseJetsam(file, report, text) {            // a JetsamEvent report: macOS's own record of ending processes to free memory
+    try {
+      const j = JSON.parse(text.slice(text.indexOf('\n') + 1)), ms = j.memoryStatus || {}, page = ms.pageSize || 16384, mb = (pages) => (pages * page) / 1048576, pages = ms.memoryPages || {};
+      const procs = (j.processes || []).map((p) => ({ name: p.name || '?', pid: p.pid, mb: mb(p.rpages || 0), max: mb(p.lifetimeMax || 0), reason: p.reason || '' })).sort((a, b) => b.mb - a.mb);
+      return { file, t: report.t, largest: j.largestProcess || '', free: 'free' in pages ? mb(pages.free) : NaN, comp: 'compressorSize' in ms ? mb(ms.compressorSize) : NaN, procs };
+    } catch (e) { return null; }
+  }
+  async function loadMemory() {
+    const gen = info, m = { csv: null, snaps: [], foots: [], jets: [], jetCount: 0, ram: NaN, act: null };
+    try {
+      const csv = memFiles(/(^|\/)excel_memory_timeline\.csv$/)[0];
+      if (csv) m.csv = parseTimeline(csv, await readText(csv, 16 << 20));
+      for (const f of memFiles(/(^|\/)(memory|system_memory|memory_snapshots)\.txt$/)) m.snaps.push(...parseSnapshots(f, await readText(f, 8 << 20)));
+      m.snaps.sort((a, b) => b.t - a.t);
+      for (const f of memFiles(/(^|\/)excel_footprint\.txt$/)) { const p = parseFootprint(f, await readText(f, 1 << 20)); if (p) m.foots.push(p); }
+      const jets = info.reports.filter((r) => r.kind === 'Jetsam').sort((a, b) => b.t - a.t);
+      m.jetCount = jets.length;
+      for (const r of jets.slice(0, 5)) {
+        const f = info.files.find((x) => x.path === r.path), j = f && parseJetsam(f, r, await readText(f, 8 << 20));
+        if (j) m.jets.push(j);
+      }
+      const sys = memFiles(/(^|\/)system_info\.txt$/)[0];
+      if (sys) m.ram = +((/^\s*Memory:\s*([\d.]+)\s*GB/m.exec(await readText(sys, 1 << 20)) || [])[1] || NaN) * 1024;
+      if (m.ram !== m.ram) m.ram = (m.snaps.find((s) => s.ram === s.ram) || { ram: NaN }).ram;
+      if (info.names.tag.includes('memory')) m.act = await call('tagTimes', { tag: 'memory', bins: 120 });
+    } catch (e) { if (info !== gen) return; m.error = e.message || String(e); }
+    if (info !== gen) return;
+    mem = m; memDrawn = '';
     if (currentTab() === 'memory') drawMemory();
   }
-  function drawMemory() {
-    if (!mem) return;
-    const el = $('#memory'), events = [], LV = { 1: 'normal', 2: 'warning', 4: 'critical' };
-    for (let i = 1; i < mem.t.length; i++) {
-      if (mem.pid[i] !== mem.pid[i - 1]) events.push([mem.t[i], !mem.pid[i] ? `Excel stopped running (was PID ${mem.pid[i - 1]}): quit, crash or force-quit` : !mem.pid[i - 1] ? `Excel started (PID ${mem.pid[i]})` : `Excel was relaunched (PID ${mem.pid[i - 1]} to ${mem.pid[i]})`]);
-      if (mem.level[i] !== mem.level[i - 1] && mem.level[i] === mem.level[i]) events.push([mem.t[i], `Memory pressure changed to ${LV[mem.level[i]] || mem.level[i]}`]);
+
+  const barTable = (cols, rows, max) => `<div class="scrollx"><table class="bars"><thead><tr>${cols.map((c, i) => `<th${i > 1 ? ' class="num"' : ''}>${esc(c)}</th>`).join('')}</tr></thead><tbody>` +
+    rows.map((r) => `<tr${r.strong ? ' class="strong"' : ''}><td>${esc(r.name)}</td><td class="mb"><i style="width:calc((100% - 84px) * ${max ? clamp(r.mb / max, 0, 1).toFixed(3) : 0})"></i><span>${fmtMB(r.mb)}</span></td>${r.rest.map((x) => `<td class="num">${esc(x)}</td>`).join('')}</tr>`).join('') + '</tbody></table></div>';
+  const moreRows = (n, html) => (n > 0 ? `<details class="rest"><summary>${fmtN(n)} more</summary>${html}</details>` : '');
+  const isExcel = (name) => /excel/i.test(name);
+
+  function memoryEvents(c) {                            // what happened during the timeline: Excel's PID changing, pressure changing, reports written
+    const ev = [], ok = c.t.filter((v) => v === v), t0 = ok[0], t1 = ok[ok.length - 1], bands = [];
+    for (let i = 1; i < c.t.length; i++) {
+      if (c.pid[i] !== c.pid[i - 1]) ev.push({ t: c.t[i], kind: 'run', text: !c.pid[i] ? `Excel stopped running (was PID ${c.pid[i - 1]}): quit, crash or force-quit` : !c.pid[i - 1] ? `Excel started (PID ${c.pid[i]})` : `Excel was relaunched (PID ${c.pid[i - 1]} to ${c.pid[i]})` });
+      if (c.level[i] !== c.level[i - 1] && c.level[i] === c.level[i]) ev.push({ t: c.t[i], kind: 'level', text: `Memory pressure changed to ${PRESSURE[c.level[i]] || c.level[i]}` });
     }
-    const peak = Math.max(...mem.foot.filter((v) => v === v), 0);
-    el.innerHTML = `<p class="dim">${fmtN(mem.t.length)} samples from <a data-i="${mem.file.i}">${esc(mem.file.path)}</a> (opens as a table). Click a chart to jump to that moment on the timeline.</p>
-      <div class="tiles"><div><b>${fmtN(peak)} MB</b><span>peak Excel footprint</span></div><div><b>${fmtN(events.filter((e) => /stopped|relaunched/.test(e[1])).length)}</b><span>times Excel stopped or restarted</span></div>
-      <div><b>${LV[Math.max(...mem.level.filter((v) => v === v), 1)] || '?'}</b><span>highest memory pressure</span></div></div>
-      <h2>Excel memory</h2><div class="chart" id="ch1"></div><h2>System memory</h2><div class="chart" id="ch2"></div>
-      <h2>Events</h2>${events.length ? `<ul class="events">${events.map(([t, m]) => `<li><a data-t="${t}">${fmtTime(t, false)}</a> ${esc(m)}</li>`).join('')}</ul>` : '<p class="dim">Excel kept the same PID and memory pressure did not change.</p>'}`;
-    lineChart($('#ch1'), mem.t, [{ name: 'Physical footprint', cls: 'c1', v: mem.foot }, { name: 'Compressed', cls: 'c2', v: mem.cmp }]);
-    lineChart($('#ch2'), mem.t, [{ name: 'Free', cls: 'c1', v: mem.free }, { name: 'Held by the compressor', cls: 'c2', v: mem.comp }, { name: 'Swap used', cls: 'c3', v: mem.swap }]);
+    for (let i = 0; i < c.t.length; i++) {              // spans at warning or critical, for shading
+      const lv = c.level[i];
+      if (lv !== 2 && lv !== 4) continue;
+      let j = i;
+      while (j + 1 < c.t.length && c.level[j + 1] === lv) j++;
+      bands.push({ t0: c.t[i], t1: j + 1 < c.t.length ? c.t[j + 1] : c.t[j], level: lv });
+      i = j;
+    }
+    for (const r of info.reports) {
+      if (r.t < t0 || r.t > t1) continue;
+      if (r.kind === 'Jetsam' || r.kind === 'Panic' || (/^(Crash|Hang|Spin|Force quit)$/.test(r.kind) && isExcel(r.proc))) ev.push({ t: r.t, kind: 'report', text: r.kind === 'Jetsam' ? 'Jetsam report' : `${r.kind} report: ${r.proc}`, path: r.path });
+    }
+    return { ev: ev.sort((a, b) => a.t - b.t), bands, t0, t1 };
   }
-  function lineChart(el, t, series) {
-    const W = el.clientWidth || 800, H = 230, L = 56, R = 14, T = 10, B = 24, pw = W - L - R, ph = H - T - B;
+
+  function drawMemory() {
+    const el = $('#memory');
+    if (!mem) { el.innerHTML = '<p class="dim">Reading the memory files…</p>'; return; }
+    const key = `${tzMode}|${info.name}`;
+    const c = mem.csv, E = c ? memoryEvents(c) : null;
+    if (memDrawn !== key) {
+      memDrawn = key;
+      const fileLink = (f) => `<a data-i="${f.i}">${esc(f.path)}</a>`, when = (t) => `<a data-t="${t}" title="Open the timeline at this moment">${fmtTime(t, false)}</a>`;
+      const tiles = [];
+      if (mem.ram === mem.ram) tiles.push([`${fmtN(Math.round(mem.ram / 1024))} GB`, 'memory installed']);
+      if (c) {
+        tiles.push([fmtMB(Math.max(...c.foot.filter((v) => v === v), 0)), 'highest Excel footprint sampled']);
+        tiles.push([PRESSURE[Math.max(...c.level.filter((v) => v === v), 1)] || '?', 'highest memory pressure sampled']);
+        tiles.push([fmtN(E.ev.filter((e) => e.kind === 'run' && /stopped|relaunched/.test(e.text)).length), 'times Excel stopped or restarted']);
+      }
+      const snap = mem.snaps[0], foot = mem.foots[0];
+      if (!c && foot) tiles.push([fmtMB(foot.total), 'Excel footprint when collected']);
+      if (!c && snap && snap.level === snap.level) tiles.push([PRESSURE[snap.level] || String(snap.level), 'memory pressure when collected']);
+      if (!c && snap && snap.swap === snap.swap) tiles.push([fmtMB(snap.swap), 'swap in use when collected']);
+      if (mem.jetCount) tiles.push([fmtN(mem.jetCount), mem.jetCount === 1 ? 'jetsam report' : 'jetsam reports']);
+      if (mem.act && mem.act.total) tiles.push([fmtN(mem.act.total), 'log entries tagged memory']);
+      let h = `<p class="dim">What this bundle recorded about memory. The figures are shown as the collector and macOS wrote them; nothing here is interpreted.</p>` +
+        (mem.error ? `<p class="dim">Some of it could not be read: ${esc(mem.error)}</p>` : '') +
+        `<div class="tiles">${tiles.map(([v, l]) => `<div><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join('')}</div>`;
+      if (c) {
+        h += `<h2>Sampled over time</h2><p class="dim">${fmtN(c.t.length)} samples from ${fileLink(c.file)}. Drag across a chart to open that span on the timeline, or click to jump to a moment.</p>
+          <div class="chartkey"><span><i class="mk run"></i>Excel started or stopped</span><span><i class="mk rep"></i>crash, hang or jetsam report</span><span><i class="bd w"></i>memory pressure: warning</span><span><i class="bd c"></i>critical</span></div>
+          <h3>Excel memory</h3><div class="chart" id="ch1"></div><h3>System memory</h3><div class="chart" id="ch2"></div>
+          <h3>Excel CPU</h3><div class="chart" id="ch3"></div><h3>Excel threads</h3><div class="chart" id="ch4"></div>
+          <h3>Events in this period</h3>${E.ev.length ? `<ul class="events">${E.ev.map((e) => `<li>${when(e.t)} ${esc(e.text)}</li>`).join('')}</ul>` : '<p class="dim">Excel kept the same PID, memory pressure did not change, and no crash, hang or jetsam report falls in this period.</p>'}`;
+      }
+      if (mem.act && mem.act.total) {
+        h += `<h2>Memory entries in the logs</h2><p class="dim">${fmtN(mem.act.total)} entries tagged <code>memory</code>: the kernel's memory-pressure, compressor, swap and jetsam messages. The chart shows how many were logged over time. <a data-act="memtag">Show them on the timeline</a></p><div class="chart" id="ch5"></div>`;
+      }
+      if (mem.snaps.length) {
+        h += `<h2>Memory snapshots</h2><p class="dim">The state of the whole Mac at the moments the collector took a snapshot: the processes using the most memory, as <code>top</code> listed them.</p>`;
+        mem.snaps.slice(0, 6).forEach((s, k) => {
+          const max = Math.max(...s.procs.map((p) => p.mb), 1), rows = s.procs.map((p) => ({ name: p.name, mb: p.mb, strong: isExcel(p.name), rest: [fmtMB(p.cmp), p.pid] }));
+          const facts = [s.level === s.level && `Memory pressure: ${PRESSURE[s.level] || s.level}`, s.swap === s.swap && `Swap in use: ${fmtMB(s.swap)}`, s.phys && `Physical memory: ${s.phys}`].filter(Boolean);
+          h += `<details class="block"${k ? '' : ' open'}><summary>${fmtTime(s.t, false)} <span class="dim">${esc(s.file.path)}</span></summary><p>${facts.map(esc).join(' · ')} · ${when(s.t)} on the timeline · ${fileLink(s.file)}</p>` +
+            (rows.length ? barTable(['Process', 'Memory', 'Compressed', 'PID'], rows.slice(0, 12), max) + moreRows(rows.length - 12, barTable(['Process', 'Memory', 'Compressed', 'PID'], rows.slice(12), max)) : '<p class="dim">No process list in this snapshot.</p>') + '</details>';
+        });
+        if (mem.snaps.length > 6) h += `<p class="dim">${fmtN(mem.snaps.length - 6)} earlier snapshots are in the files listed above.</p>`;
+      }
+      if (mem.foots.length) {
+        h += `<h2>Excel's memory by kind</h2><p class="dim">How Excel's footprint divided up when the collector ran <code>footprint</code> on it. MALLOC rows are memory the app allocated itself; IOSurface, CoreAnimation and CG rows are graphics.</p>`;
+        for (const f of mem.foots) {
+          const max = Math.max(...f.rows.map((r) => r.mb), 1), rows = f.rows.map((r) => ({ name: r.name, mb: r.mb, rest: [fmtN(r.regions)] }));
+          h += `<p><b>${esc(f.proc)}</b> (PID ${f.pid}): ${fmtMB(f.total)} footprint · ${fileLink(f.file)}</p>` + barTable(['Kind', 'Memory', 'Regions'], rows.slice(0, 12), max) + moreRows(rows.length - 12, barTable(['Kind', 'Memory', 'Regions'], rows.slice(12), max));
+        }
+      }
+      if (mem.jetCount) {
+        h += `<h2>Jetsam reports</h2><p class="dim">macOS writes a JetsamEvent report when it ends processes to free memory. Each lists every process and its memory at that moment. Where macOS wrote a reason against a process, it is shown.</p>`;
+        for (const j of mem.jets) {
+          const max = Math.max(...j.procs.map((p) => p.mb), 1), named = j.procs.filter((p) => p.reason);
+          const row = (p) => ({ name: p.name, mb: p.mb, strong: isExcel(p.name), rest: [fmtMB(p.max), p.reason] });
+          const facts = [j.largest && `Largest process, as recorded: ${j.largest}`, j.free === j.free && `Free: ${fmtMB(j.free)}`, j.comp === j.comp && `Held by the compressor: ${fmtMB(j.comp)}`, `${fmtN(j.procs.length)} processes listed`].filter(Boolean);
+          h += `<details class="block" open><summary>${fmtTime(j.t, false)} <span class="dim">${esc(j.file.path.slice(j.file.path.lastIndexOf('/') + 1))}</span></summary><p>${facts.map(esc).join(' · ')} · ${when(j.t)} on the timeline · ${fileLink(j.file)}</p>` +
+            (named.length ? `<h4>Processes with a recorded reason</h4>${barTable(['Process', 'Memory', 'Lifetime peak', 'Reason'], named.slice(0, 20).map(row), max)}${named.length > 20 ? `<p class="dim">${fmtN(named.length - 20)} more in the report.</p>` : ''}` : '<p class="dim">No process in this report has a recorded reason.</p>') +
+            `<h4>Largest processes</h4>${barTable(['Process', 'Memory', 'Lifetime peak', 'Reason'], j.procs.slice(0, 10).map(row), max)}</details>`;
+        }
+        if (mem.jetCount > mem.jets.length) h += `<p class="dim">${fmtN(mem.jetCount - mem.jets.length)} more jetsam reports are on the timeline (search <code>Jetsam</code>) and under Files.</p>`;
+      }
+      el.innerHTML = h;
+    }
+    if (c) {
+      const o = { t0: E.t0, t1: E.t1, marks: E.ev.filter((e) => e.kind !== 'level'), bands: E.bands };
+      lineChart($('#ch1'), c.t, [{ name: 'Physical footprint', cls: 'c1', v: c.foot }, { name: 'Compressed', cls: 'c2', v: c.cmp }], { ...o, unit: 'MB' });
+      lineChart($('#ch2'), c.t, [{ name: 'Free', cls: 'c1', v: c.free }, { name: 'Held by the compressor', cls: 'c2', v: c.comp }, { name: 'Swap used', cls: 'c3', v: c.swap }], { ...o, unit: 'MB' });
+      lineChart($('#ch3'), c.t, [{ name: 'Excel CPU', cls: 'c1', v: c.cpu }], { ...o, unit: '%', h: 150 });
+      lineChart($('#ch4'), c.t, [{ name: 'Excel threads', cls: 'c1', v: c.threads }], { ...o, unit: 'threads', h: 150 });
+    }
+    if (mem.act && mem.act.total && $('#ch5')) countChart($('#ch5'), mem.act);
+  }
+
+  // Shared pointer handling for the memory charts: hover reports a time, a drag opens that span on the timeline, a click jumps to a moment.
+  function chartPointer(el, svg, L, pw, t0, t1, onHover, snap) {
+    const brush = $('.brush', svg), timeAt = (x) => t0 + (clamp(x - L, 0, pw) / pw) * (t1 - t0), xOf = (e) => e.clientX - svg.getBoundingClientRect().left;
+    let down = null;
+    svg.addEventListener('pointerdown', (e) => { if (e.button !== 0) return; down = xOf(e); svg.setPointerCapture(e.pointerId); });
+    svg.addEventListener('pointermove', (e) => {
+      const x = xOf(e);
+      if (down != null && Math.abs(x - down) > 4) {
+        const a = clamp(Math.min(x, down), L, L + pw), b = clamp(Math.max(x, down), L, L + pw);
+        brush.setAttribute('x', a); brush.setAttribute('width', b - a); brush.setAttribute('visibility', 'visible');
+      }
+      onHover(timeAt(x), x);
+    });
+    svg.addEventListener('pointerup', (e) => {
+      const x = xOf(e), was = down;
+      down = null; brush.setAttribute('visibility', 'hidden');
+      if (was == null) return;
+      if (Math.abs(x - was) > 4) openRange(timeAt(Math.min(x, was)), timeAt(Math.max(x, was))); else jumpTo(snap ? snap(timeAt(x)) : timeAt(x));
+    });
+    svg.addEventListener('pointerleave', () => onHover(null));
+  }
+  function openRange(a, b) {                            // show a span of time on the timeline
+    if (!(b - a >= 1)) return;
+    S.t0 = a; S.t1 = b;
+    $('#banner').hidden = true;
+    showTab('timeline');
+    schedule();
+  }
+  const tipRow = (tip, cls, strong, text) => { const row = document.createElement('div'), key = document.createElement('i'), val = document.createElement('b'); key.className = cls; val.textContent = strong; row.append(key, val, ` ${text}`); tip.append(row); };
+  const tipHead = (tip, text) => { tip.replaceChildren(); const head = document.createElement('div'); head.className = 'tt'; head.textContent = text; tip.append(head); };
+
+  function lineChart(el, t, series, o) {
+    const W = el.clientWidth || 800, H = o.h || 230, L = 56, R = 14, T = 12, B = 24, pw = W - L - R, ph = H - T - B;
     const ok = t.map((v, i) => (v === v ? i : -1)).filter((i) => i >= 0);
     if (!ok.length) { el.textContent = 'No samples.'; return; }
-    const t0 = t[ok[0]], t1 = Math.max(t[ok[ok.length - 1]], t0 + 1);
+    const t0 = o.t0, t1 = Math.max(o.t1, t0 + 1);
     let max = 1;
     for (const s of series) for (const v of s.v) if (v > max) max = v;
     const step = [1, 2, 2.5, 5, 10].map((m) => m * 10 ** Math.floor(Math.log10(max / 4))).find((x) => max / x <= 5) || max;
     const top = Math.ceil(max / step) * step, X = (v) => L + ((v - t0) / (t1 - t0)) * pw, Y = (v) => T + ph - (v / top) * ph;
-    let s = `<svg width="${W}" height="${H}" role="img" aria-label="${esc(series.map((x) => x.name).join(', '))} in megabytes over time">`;
+    let s = `<svg width="${W}" height="${H}" role="img" aria-label="${esc(series.map((x) => x.name).join(', '))} over time, in ${esc(o.unit)}">`;
+    for (const b of o.bands) s += `<rect class="band ${b.level === 4 ? 'c' : 'w'}" x="${X(b.t0).toFixed(1)}" y="${T}" width="${Math.max(1, X(b.t1) - X(b.t0)).toFixed(1)}" height="${ph}"/>`;
     for (let v = 0; v <= top + 1e-9; v += step) s += `<line class="${v ? 'grid' : 'axis'}" x1="${L}" x2="${W - R}" y1="${Y(v) + 0.5}" y2="${Y(v) + 0.5}"/><text class="tick" x="${L - 8}" y="${Y(v) + 4}" text-anchor="end">${fmtN(v)}</text>`;
     const nt = clamp(Math.floor(pw / 150), 2, 8);
     for (let i = 0; i <= nt; i++) { const tv = t0 + ((t1 - t0) * i) / nt; s += `<text class="tick" x="${X(tv)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === nt ? 'end' : 'middle'}">${fmtTime(tv, false).slice(t1 - t0 > 36 * 3600e3 ? 5 : 11, 16)}</text>`; }
+    for (const m of o.marks) { const x = X(m.t).toFixed(1); s += `<g class="mark ${m.kind === 'report' ? 'rep' : 'run'}"><line x1="${x}" x2="${x}" y1="${T}" y2="${T + ph}"/><path d="M${x - 4},${T - 7}h8l-4,7z"/></g>`; }
     for (const sr of series) {
       let d = '', pen = false;
       for (const i of ok) { const v = sr.v[i]; if (v !== v) { pen = false; continue; } d += `${pen ? 'L' : 'M'}${X(t[i]).toFixed(1)},${Y(v).toFixed(1)}`; pen = true; }
       s += `<path class="ln ${sr.cls}" d="${d}"/>`;
     }
-    s += `<line class="cross" y1="${T}" y2="${T + ph}" visibility="hidden"/>${series.map((sr) => `<circle class="dot ${sr.cls}" r="4" visibility="hidden"/>`).join('')}</svg>`;
-    el.innerHTML = `<div class="legend">${series.map((sr) => `<span><i class="key ${sr.cls}"></i>${esc(sr.name)}</span>`).join('')}<span class="dim">MB</span></div>${s}<div class="tip" hidden></div>`;
+    s += `<line class="cross" y1="${T}" y2="${T + ph}" visibility="hidden"/>${series.map((sr) => `<circle class="dot ${sr.cls}" r="4" visibility="hidden"/>`).join('')}<rect class="brush" y="${T}" height="${ph}" width="0" visibility="hidden"/></svg>`;
+    el.innerHTML = (series.length > 1 ? `<div class="legend">${series.map((sr) => `<span><i class="key ${sr.cls}"></i>${esc(sr.name)}</span>`).join('')}<span class="dim">${esc(o.unit)}</span></div>` : '') + `${s}<div class="tip" hidden></div>`;
     const svg = $('svg', el), tip = $('.tip', el), cross = $('.cross', el), dots = [...el.querySelectorAll('.dot')];
-    const nearest = (e) => { const x = e.clientX - svg.getBoundingClientRect().left, tv = t0 + ((x - L) / pw) * (t1 - t0); let best = ok[0]; for (const i of ok) if (Math.abs(t[i] - tv) < Math.abs(t[best] - tv)) best = i; return best; };
-    svg.addEventListener('pointermove', (e) => {
-      const i = nearest(e), x = X(t[i]);
+    const nearest = (tv) => { let best = ok[0]; for (const i of ok) if (Math.abs(t[i] - tv) < Math.abs(t[best] - tv)) best = i; return best; };
+    const unit = (v) => (o.unit === 'MB' ? `${fmtN(v)} MB` : o.unit === '%' ? `${v}%` : fmtN(v));
+    chartPointer(el, svg, L, pw, t0, t1, (tv) => {
+      if (tv == null) { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); dots.forEach((d) => d.setAttribute('visibility', 'hidden')); return; }
+      const i = nearest(tv), x = X(t[i]);
       cross.setAttribute('x1', x); cross.setAttribute('x2', x); cross.setAttribute('visibility', 'visible');
-      tip.replaceChildren();
-      const head = document.createElement('div');
-      head.className = 'tt'; head.textContent = fmtTime(t[i], false);
-      tip.append(head);
+      tipHead(tip, fmtTime(t[i], false));
       series.forEach((sr, k) => {
-        const v = sr.v[i], row = document.createElement('div'), key = document.createElement('i'), val = document.createElement('b');
-        key.className = `key ${sr.cls}`; val.textContent = v === v ? `${fmtN(v)} MB` : 'no sample';
-        row.append(key, val, ` ${sr.name}`);
-        tip.append(row);
+        const v = sr.v[i];
+        tipRow(tip, `key ${sr.cls}`, v === v ? unit(v) : 'no sample', sr.name);
         dots[k].setAttribute('visibility', v === v ? 'visible' : 'hidden');
         if (v === v) { dots[k].setAttribute('cx', x); dots[k].setAttribute('cy', Y(v)); }
       });
+      const near = ((t1 - t0) / pw) * 7;                // events within a few pixels of the pointer
+      for (const m of o.marks) if (Math.abs(m.t - tv) <= near) tipRow(tip, `mk ${m.kind === 'report' ? 'rep' : 'run'}`, fmtTime(m.t, false).slice(11), m.text);
+      for (const b of o.bands) if (tv >= b.t0 && tv <= b.t1) tipRow(tip, `bd ${b.level === 4 ? 'c' : 'w'}`, PRESSURE[b.level], 'memory pressure');
+      tip.hidden = false;
+      tip.style.left = `${clamp(x + 14, 0, W - tip.offsetWidth - 4)}px`;
+    }, (tv) => t[nearest(tv)]);
+  }
+  function countChart(el, a) {                          // how many entries were logged in each slice of time
+    const W = el.clientWidth || 800, H = 150, L = 56, R = 14, T = 12, B = 24, pw = W - L - R, ph = H - T - B, bw = pw / a.nb;
+    const max = Math.max(...a.bins, 1), step = [1, 2, 2.5, 5, 10].map((m) => m * 10 ** Math.floor(Math.log10(Math.max(max, 4) / 4))).find((x) => max / x <= 5) || max;
+    const top = Math.max(1, Math.ceil(max / step) * step), Y = (v) => T + ph - (v / top) * ph;
+    let s = `<svg width="${W}" height="${H}" role="img" aria-label="Number of log entries tagged memory over time">`;
+    for (let v = 0; v <= top + 1e-9; v += step) s += `<line class="${v ? 'grid' : 'axis'}" x1="${L}" x2="${W - R}" y1="${Y(v) + 0.5}" y2="${Y(v) + 0.5}"/><text class="tick" x="${L - 8}" y="${Y(v) + 4}" text-anchor="end">${fmtN(v)}</text>`;
+    const nt = clamp(Math.floor(pw / 150), 2, 8), span = a.t1 - a.t0;
+    for (let i = 0; i <= nt; i++) { const tv = a.t0 + (span * i) / nt; s += `<text class="tick" x="${L + (pw * i) / nt}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === nt ? 'end' : 'middle'}">${fmtTime(tv, false).slice(span > 36 * 3600e3 ? 5 : 11, 16)}</text>`; }
+    const w = Math.max(1, bw - (bw > 4 ? 2 : 0));
+    a.bins.forEach((n, b) => { if (!n) return; const hh = Math.max(2, (n / top) * ph), r = Math.min(3, w / 2, hh), x = L + b * bw, y = T + ph - hh; s += `<path class="cbar" d="M${x.toFixed(1)},${y + hh}V${y + r}q0,${-r} ${r},${-r}h${(w - 2 * r).toFixed(1)}q${r},0 ${r},${r}V${y + hh}Z"/>`; });
+    s += `<rect class="hov" y="${T}" height="${ph}" width="${bw}" visibility="hidden"/><rect class="brush" y="${T}" height="${ph}" width="0" visibility="hidden"/></svg>`;
+    el.innerHTML = `${s}<div class="tip" hidden></div>`;
+    const svg = $('svg', el), tip = $('.tip', el), hov = $('.hov', el);
+    chartPointer(el, svg, L, pw, a.t0, a.t1, (tv, x) => {
+      if (tv == null) { tip.hidden = true; hov.setAttribute('visibility', 'hidden'); return; }
+      const b = clamp(Math.floor(((tv - a.t0) / span) * a.nb), 0, a.nb - 1);
+      hov.setAttribute('x', L + b * bw); hov.setAttribute('visibility', 'visible');
+      tipHead(tip, `${fmtTime(a.t0 + (span * b) / a.nb, false)} to ${fmtTime(a.t0 + (span * (b + 1)) / a.nb, false).slice(11)}`);
+      tipRow(tip, 'key c1', fmtN(a.bins[b]), a.bins[b] === 1 ? 'entry tagged memory' : 'entries tagged memory');
       tip.hidden = false;
       tip.style.left = `${clamp(x + 14, 0, W - tip.offsetWidth - 4)}px`;
     });
-    svg.addEventListener('pointerleave', () => { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); dots.forEach((d) => d.setAttribute('visibility', 'hidden')); });
-    svg.addEventListener('click', (e) => jumpTo(t[nearest(e)]));
   }
   async function jumpTo(t) {                            // open the timeline at a moment, widening the window if needed
     if ((S.t0 != null && t < S.t0) || (S.t1 != null && t > S.t1)) { S.t0 = S.t1 = null; await runQuery(); }
@@ -739,7 +941,12 @@
     setTop(k - 3);
     select(k, false);
   }
-  $('#memory').addEventListener('click', (e) => { if (e.target.dataset.t) jumpTo(+e.target.dataset.t); else if (e.target.dataset.i) openFile(+e.target.dataset.i); });
+  $('#memory').addEventListener('click', (e) => {
+    const d = e.target.dataset;
+    if (d.t) jumpTo(+d.t);
+    else if (d.i) openFile(+d.i);
+    else if (d.act === 'memtag') { S.facets.tag = { inc: [info.names.tag.indexOf('memory')], exc: [] }; showTab('timeline'); schedule(); }
+  });
 
   // ---------- wiring ----------
   $('#q').addEventListener('input', (e) => { S.text = e.target.value; schedule(250); });

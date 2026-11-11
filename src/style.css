@@ -176,6 +176,7 @@ mark { background: var(--mark); color: var(--markink); border-radius: 2px; }
 #tree summary { font-weight: 500; display: flex; gap: 6px; padding: 2px 10px; }
 #tree summary::before { content: "▸"; color: var(--muted); }
 #tree details[open] > summary::before { content: "▾"; }
+#tree .cnt { color: var(--muted); font-weight: 400; }
 #tree .n { color: var(--muted); font-size: 11.5px; margin-left: auto; padding-left: 8px; white-space: nowrap; }
 .tf { display: flex; padding: 1px 10px 1px 26px; color: var(--ink); }
 .tf span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -210,6 +211,36 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .dot.c1 { fill: var(--c1); stroke: var(--surface); } .dot.c2 { fill: var(--c2); stroke: var(--surface); } .dot.c3 { fill: var(--c3); stroke: var(--surface); }
 .cross { stroke: var(--axis); stroke-width: 1; }
 .events { padding-left: 18px; }
+.pad h3 { font-size: 13px; margin: 14px 0 6px; }
+.pad h4 { font-size: 12.5px; margin: 10px 0 4px; color: var(--ink2); }
+.chartkey { display: flex; gap: 6px 18px; flex-wrap: wrap; color: var(--ink2); font-size: 12px; margin: 0 0 2px; }
+.mk { display: inline-block; width: 0; height: 12px; border-left: 2px solid var(--ink); margin: 0 8px 0 4px; vertical-align: -2px; }
+.mk.run { border-left: 1.5px dashed var(--ink2); }
+.bd { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: -2px; }
+.bd.w { background: color-mix(in srgb, var(--warning) 40%, transparent); }
+.bd.c { background: color-mix(in srgb, var(--critical) 40%, transparent); }
+.band { opacity: .16; }
+.band.w { fill: var(--warning); }
+.band.c { fill: var(--critical); }
+.mark line { stroke: var(--ink); stroke-width: 1.5; }
+.mark path { fill: var(--ink); }
+.mark.run line { stroke: var(--ink2); stroke-width: 1; stroke-dasharray: 4 3; }
+.mark.run path { fill: var(--ink2); }
+.cbar { fill: var(--c1); }
+.chart .tip i.key { margin-right: 6px; }
+.scrollx { overflow-x: auto; }
+table.bars { border-collapse: collapse; width: 100%; max-width: 780px; font-size: 12.5px; margin: 4px 0 8px; }
+.bars th { text-align: left; font-weight: 500; color: var(--ink2); padding: 2px 12px 2px 0; border-bottom: 1px solid var(--hair); }
+.bars td { padding: 2px 12px 2px 0; white-space: nowrap; }
+.bars .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink2); }
+.bars td.mb { width: 46%; }
+.bars td.mb i { display: inline-block; height: 10px; min-width: 1px; border-radius: 0 3px 3px 0; background: var(--c1); vertical-align: -1px; margin-right: 8px; }
+.bars td.mb span { font-variant-numeric: tabular-nums; }
+.bars tr.strong td:first-child { font-weight: 650; }
+details.block { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 6px 14px; margin: 8px 0; }
+details.block > summary { cursor: pointer; font-weight: 600; }
+details.block > summary .dim { font-weight: 400; margin-left: 6px; }
+details.rest > summary { cursor: pointer; color: var(--accent); margin: 2px 0 6px; }
 dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--ink); max-width: min(640px, 92vw); padding: 18px 22px; }
 dialog::backdrop { background: rgba(0, 0, 0, .35); }
 dialog h2 { margin-top: 0; }

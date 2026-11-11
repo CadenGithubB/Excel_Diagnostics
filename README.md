@@ -47,7 +47,14 @@ The File menu also opens another zip, folder or the sample data, saves a copy of
 
 - **Files** lists everything in the bundle and opens text, Markdown and TSV files, with a hex preview for binary ones.
 - **Overview** shows the collector's summary, the collection status and what each source covers.
-- **Memory** appears when the bundle has `excel_memory_timeline.csv` (watch and repro modes). It charts Excel's footprint and system memory; click a chart to jump to that moment on the timeline.
+- **Memory** lays out what the bundle recorded about memory, as recorded and without interpretation:
+  - the collector's memory snapshots, with the processes using the most memory
+  - Excel's footprint by kind, from `footprint`
+  - JetsamEvent reports, which macOS writes when it ends processes to free memory
+  - when the kernel's memory messages were logged
+  - for watch and repro bundles, charts of Excel's footprint, CPU and threads and of system memory from `excel_memory_timeline.csv`, with Excel starts and stops and crash, hang and jetsam reports marked and periods of memory pressure shaded
+
+  Drag across a chart to open that span on the timeline, or click to jump to a moment.
 
 ### Large captures
 
