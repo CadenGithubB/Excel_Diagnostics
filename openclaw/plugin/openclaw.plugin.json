@@ -2,7 +2,7 @@
   "id": "excel-diagnostics",
   "name": "Excel Diagnostics",
   "description": "Read-only search of Excel diagnostics log bundles kept in a folder on the host.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

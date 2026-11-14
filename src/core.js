@@ -94,9 +94,13 @@ const Core = (() => {
     return m ? (m[1] === '-' ? -1 : 1) * (m[2] * 60 + (+m[3] || 0)) : NaN;
   }
   function stamp(t, digits = 3) {                       // UTC ms -> "YYYY-MM-DD HH:MM:SS.fff"
-    const d = new Date(Math.floor(t)), z = (n, w = 2) => String(n).padStart(w, '0');
+    // Past milliseconds, count in the smallest unit shown and round: a time read from ".123456" is held as a float
+    // a hair under it, and cutting that off would print .123455.
+    const unit = digits > 3 ? 10 ** (digits - 3) : 1, n = digits > 3 ? Math.round(t * unit) : Math.floor(t);
+    const d = new Date(Math.floor(n / unit)), z = (v, w = 2) => String(v).padStart(w, '0');
     let s = `${d.getUTCFullYear()}-${z(d.getUTCMonth() + 1)}-${z(d.getUTCDate())} ${z(d.getUTCHours())}:${z(d.getUTCMinutes())}:${z(d.getUTCSeconds())}`;
-    if (digits) s += '.' + z(Math.floor((t - Math.floor(t / 1000) * 1000) * 10 ** (digits - 3)), digits);
+    if (digits > 3) s += '.' + z(n - Math.floor(n / (1000 * unit)) * 1000 * unit, digits);
+    else if (digits) s += '.' + z(Math.floor((t - Math.floor(t / 1000) * 1000) * 10 ** (digits - 3)), digits);
     return s;
   }
 
@@ -104,7 +108,9 @@ const Core = (() => {
   // Reads zip64, and also repairs what `ditto -c -k` (the collector's zipper) writes instead of zip64: plain
   // 32-bit sizes and offsets that silently wrap around once a file or the archive passes 4 GB.
   const GB4 = 4294967296;
-  async function readZip(file) {
+  // MOST, when given, is how many members the caller will take: a zip that lists more stops being read there and
+  // is refused, before an object is made for each of what can be millions of tiny records.
+  async function readZip(file, most = Infinity) {
     const size = file.size, tailLen = Math.min(size, 65557 + 20);
     const tail = new Uint8Array(await file.slice(size - tailLen).arrayBuffer());
     const dv = new DataView(tail.buffer);
@@ -137,7 +143,9 @@ const Core = (() => {
         x += 4 + len;
       }
       p += 46 + n + m + k;
+      if (out.length >= most) throw Object.assign(new Error(`This zip lists more than ${most} members.`), { tooMany: true });
       out.push({ path: name, size: usize, csize, method, hdr, next: null, cdOff });
+
     }
     for (let i = 0; i + 1 < out.length; i++) out[i].next = out[i + 1];
     return out.filter((x) => !x.path.endsWith('/'));
@@ -237,7 +245,12 @@ const Core = (() => {
     constructor(id, entry, parser) {
       this.id = id; this.entry = entry; this.path = entry.path; this.parser = parser;
       this.n = 0; this.cap = 0; this.lastOm = NaN;
-      this.alloc(Math.max(1024, Math.min(4 << 20, Math.ceil(entry.size / 200))));
+      // Room for rows is made when the first row arrives, sized from the file: every source exists before any is
+      // read, and a bundle can hold tens of thousands of files of a line or two each
+      // A zip member's size is what the zip claims, and a zip can claim gigabytes for a one-line file: room for
+      // rows is sized from a file's real size only, and for a zip member starts small and grows as rows come
+      this.first = entry.zip ? 1024 : Math.max(8, Math.min(4 << 20, Math.ceil(entry.size / 200)));
+      this.alloc(0);
     }
     alloc(cap) {
       const grow = (A, old) => { const a = new A(cap); if (old) a.set(old.subarray(0, this.n)); return a; };
@@ -247,7 +260,8 @@ const Core = (() => {
       this.cap = cap;
     }
     push(off, len, t, lvl, proc, pid, sub, cat, tags) {
-      if (this.n === this.cap) this.alloc(this.cap * 2);
+      // No memory left for more rows is not a fault in the line being read: it is marked, so that it stops the load
+      if (this.n === this.cap) { try { this.alloc(this.cap ? this.cap * 2 : this.first); } catch (err) { throw Object.assign(err, { noRoom: true }); } }
       const i = this.n++;
       this.off[i] = off; this.len[i] = len; this.t[i] = t; this.lvl[i] = lvl; this.proc[i] = proc;
       this.pid[i] = pid; this.sub[i] = sub; this.cat[i] = cat; this.tags[i] = tags;
@@ -258,8 +272,16 @@ const Core = (() => {
   }
 
   // ---------- parsers: line(src, s, p, e, off) indexes one line; fields(text) splits a row for display ----------
-  const tab = (s, i, e) => { if (i > e) return e; const j = s.indexOf('\t', i); return j < 0 || j > e ? e : j; };
+  // The next tab at or after i, or e (where the line ends) when the line has none. The last answer is kept: a line
+  // without tabs would otherwise make every call search on to the next tab anywhere in the chunk, nine times a line.
+  let tabIn = null, tabFrom = 0, tabAt = 0;
+  const tab = (s, i, e) => {
+    if (i > e) return e;
+    if (s !== tabIn || i < tabFrom || i > tabAt) { const j = s.indexOf('\t', i); tabIn = s; tabFrom = i; tabAt = j < 0 ? Infinity : j; }
+    return tabAt > e ? e : tabAt;
+  };
   const fld = (s, a, b) => (a >= b ? '' : s.substring(a, b));
+  const str = (v) => (typeof v === 'string' ? v : v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
   const unescTsv = (s) => s.replace(/\\([nrt\\])/g, (_, c) => (c === 'n' ? '\n' : c === 't' ? '\t' : c === 'r' ? '' : '\\'));
 
   function unifiedTsv(ds) {                             // unified_logs/*.tsv written by label_entries
@@ -309,7 +331,9 @@ const Core = (() => {
         const ts = j.timestamp, om = offStr(ts.slice(-5));
         let t = isoAt(ts, 0);
         if (om === om) { t -= om * 60000; if (om !== src.lastOm && t === t) { src.lastOm = om; ds.zone.push([t, om]); } }
-        const image = j.processImagePath || '', name = basename(image), m = j.eventMessage || '';
+        // A field is text only when the file says so as text: a number or a list where a name is expected is taken
+        // as written, never called as a string (one such line used to stop the whole bundle from opening)
+        const image = str(j.processImagePath), name = basename(image), m = str(j.eventMessage);
         let tags = 0;
         if (name === 'Microsoft Excel') tags |= bit('excel');
         else {
@@ -317,16 +341,22 @@ const Core = (() => {
           if (/excel/i.test(m)) tags |= bit('mentions-excel');
         }
         if (name === 'Microsoft Error Reporting' || name === 'Microsoft AutoUpdate' || name === 'Microsoft Update Assistant') tags |= bit('microsoft');
-        if (name === 'spindump') tags |= bit('hang-report');
-        if ((name === 'kernel' && /memorystatus|jetsam|compressor|swap/i.test(m)) || ((name === 'ReportCrash' || name === 'osanalyticshelper') && /jetsam/i.test(m))) tags |= bit('memory');
-        if (/previous shutdown cause/i.test(m)) tags |= bit('restart');
+        // The kernel, spindump, ReportCrash and osanalyticshelper are taken by what a process cannot choose (process ID 0,
+        // the program's full path), as the collector takes them: any process can be named like them
+        if (image === '/usr/sbin/spindump') tags |= bit('hang-report');
+        if (((image === '/kernel' || j.processID === 0) && /memorystatus|jetsam|compressor|swap/i.test(m))
+          || ((image === '/System/Library/CoreServices/ReportCrash' || image === '/System/Library/CoreServices/osanalyticshelper') && /jetsam/i.test(m))) tags |= bit('memory');
+        // Why the Mac last shut down is taken only from the kernel (its program is /kernel, its process ID 0), as the
+        // collector takes it: any process can log the same words
+        if ((image === '/kernel' || j.processID === 0) && /previous shutdown cause/i.test(m)) tags |= bit('restart');
         if (j.eventType === 'lossEvent') tags |= bit('logs-dropped');
-        src.push(off, e - p, t, lvl.id(j.messageType || j.eventType || ''), proc.id(name), j.processID | 0, sub.id(j.subsystem || ''), cat.id(j.category || ''), tags);
+        const pid = (typeof j.processID === 'number' ? j.processID : parseInt(str(j.processID), 10)) | 0;
+        src.push(off, e - p, t, lvl.id(str(j.messageType) || str(j.eventType)), proc.id(name), pid, sub.id(str(j.subsystem)), cat.id(str(j.category)), tags);
       },
       fields(text) {
         try {
           const j = JSON.parse(text);
-          return { msg: j.eventMessage || '', extra: { 'Local time': j.timestamp, Sender: basename(j.senderImagePath || ''), 'Process path': j.processImagePath } };
+          return { msg: str(j.eventMessage), extra: { 'Local time': str(j.timestamp), Sender: basename(str(j.senderImagePath)), 'Process path': str(j.processImagePath) } };
         } catch (err) { return { msg: text, extra: {} }; }
       },
     };
@@ -390,7 +420,7 @@ const Core = (() => {
       rx: /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)([-+]\d\d) \S+ ([^\[:]+)(?:\[(\d+)\])?: /,
       map: (m) => ({ t: isoAt(m[1], 0), om: offStr(m[2]), proc: m[3], pid: +m[4] || 0 }) },
     { kind: 'power', group: 'Sleep / wake', short: 'power', need: 0.6, zone: true,
-      rx: /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([-+]\d{4}) (\S+)\s*/,
+      rx: /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([-+]\d{4}) (Wake Requests|\S+)\s*/,       // "Wake Requests" is a list of scheduled wakes, not a wake
       map: (m) => ({ t: isoAt(m[1], 0), om: offStr(m[2]), proc: 'powerd', cat: m[3], lvl: 'Default' }) },
     { kind: 'text', group: 'Other logs', short: '', need: 0.6,
       rx: /^\[?(\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:[.,]\d+)?)(Z|\s?[-+]\d\d:?\d\d(?!\d))?\]?[ \t:|-]*/,
@@ -430,6 +460,19 @@ const Core = (() => {
     };
   }
 
+  // Where a collector writes the three kinds of log that speak for the system
+  const OWN_PLACE = {
+    unified: /^(?:unified_logs\/[^/]+|unified_last30m|repro\/unified_live_unfiltered)\.(?:tsv|ndjson)$/,
+    power: /^system\/sleep_wake\.txt$/,
+    install: /^system\/install_history_microsoft\.txt$/,
+  };
+  // Where a collector puts the reports that only macOS writes: its copies of the system's own report folders
+  const SYSTEM_REPORTS = /^reports\/Library_Logs_DiagnosticReports(?:_Retired)?\/[^/]+$/;
+  function sniffText(ds, path, head) {                  // a log with times at the start of its lines, of no particular kind, or nothing
+    const spec = RX_KINDS[RX_KINDS.length - 1], lines = head.split(/\r?\n/).filter(Boolean).slice(0, 25);
+    const hits = lines.filter((l) => spec.rx.test(l)).length;
+    return lines.length && hits >= Math.max(1, Math.ceil((lines.length - 1) * spec.need)) ? rxKind(ds, spec, path) : null;
+  }
   function sniff(ds, path, head) {
     if (head.startsWith('local_time\tutc_time\t')) return unifiedTsv(ds);
     if (head.startsWith('Timestamp\tProcess\tTID\t') || /^\d\d\/\d\d\/\d{4} \d\d:\d\d:\d\d\.\d{3}\t/.test(head)) return officeUls(ds, path);
@@ -443,12 +486,40 @@ const Core = (() => {
     return null;
   }
 
+  // Where the bundle is among the paths given. A collector's bundle is the folder with manifest.tsv or bundle_info.tsv
+  // at its top. It may sit inside folders that hold nothing else (a folder picked one level up, a zip unpacked into a
+  // folder of its own), and beside it at each level may lie the zip the collector made of it and that zip's
+  // checksum. Returns the folder's path with its closing slash ('' when the files were given with no folder), the
+  // numbers of the packaging files beside it, and how many of those are zips; or null when no such folder is found.
+  function bundleFolder(paths) {
+    const aside = new Set();
+    let prefix = '', zips = 0;
+    for (let depth = 0; depth < 8; depth++) {
+      let folder = null, own = false, several = false;
+      const beside = [];
+      for (let i = 0; i < paths.length; i++) {
+        if (aside.has(i)) continue;
+        const rest = paths[i].slice(prefix.length), cut = rest.indexOf('/');
+        if (cut < 0) { if (rest === 'manifest.tsv' || rest === 'bundle_info.tsv') own = true; else beside.push(i); }
+        else if (folder === null) folder = rest.slice(0, cut);
+        else if (folder !== rest.slice(0, cut)) several = true;
+      }
+      if (own) return { prefix, aside, zips };
+      // Only one folder is stepped into, and only past packaging: among several folders, or beside other files, none is singled out
+      if (folder === null || several || !beside.every((i) => /\.zip(?:\.sha256)?$/i.test(paths[i]))) return null;
+      for (const i of beside) { aside.add(i); if (/\.zip$/i.test(paths[i])) zips++; }
+      prefix += folder + '/';
+    }
+    return null;
+  }
+
   // ---------- dataset ----------
   class Dataset {
     constructor() {
       this.dict = { lvl: new Dict(250), proc: new Dict(65000), sub: new Dict(65000), cat: new Dict(65000) };
       this.tagNames = []; this.zone = []; this.entries = []; this.sources = []; this.reportList = [];
       this.run = 0; this.textCache = null; this.view = new Uint32Array(0); this.lastBlob = null;
+      this.collector = false; this.unread = 0;
     }
     tagId(name) {
       let i = this.tagNames.indexOf(name);
@@ -467,36 +538,68 @@ const Core = (() => {
     async load(inputs, progress) {
       // inputs: [{path, blob}] - one zip, or the files of an unzipped bundle, or loose log files.
       // loose: true marks a zip that is known to be one of a bundle's own files, to be listed and not opened.
-      const zips = inputs.filter((f) => !f.loose && /\.zip$/i.test(f.path));
-      if (zips.length > 1) throw new Error('Open one bundle at a time (several .zip files were given).');
-      let name;
-      if (zips.length === 1) {
-        progress({ phase: 'Reading the zip directory' });
-        const file = zips[0].blob;
-        name = basename(zips[0].path).replace(/\.zip$/i, '');
-        for (const e of await readZip(file)) this.entries.push(new Entry(e.path, e.size, null, { file, e }));
-      } else {
-        for (const f of inputs) this.entries.push(new Entry(f.path.replace(/^\/+/, ''), f.blob.size, f.blob));
+      // What macOS and its Finder leave in folders and zips: set aside before anything is decided from the names given.
+      // .localized marks Desktop, Documents and Downloads; "Icon" and a carriage return holds a folder's own icon.
+      const clutter = /(^|\/)(__MACOSX\/|\.DS_Store$|\._[^/]*$|\.localized$|Icon\r$)/;
+      const given = inputs.filter((f) => !clutter.test(f.path)), notes = [];
+      const asEntry = (f) => new Entry(f.path.replace(/^\/+/, ''), f.blob.size, f.blob);
+      // The collector leaves three things side by side: the bundle's folder, its zip and the zip's checksum. Given
+      // together, or inside the folder that holds them, the folder is the bundle and the other two are set aside.
+      let zips = [], name, found = bundleFolder(given.map((f) => f.path.replace(/^\/+/, '')));
+      if (found) this.entries = given.filter((f, i) => !found.aside.has(i)).map(asEntry);
+      else {
+        // A zip is the bundle only when it was given by itself, or with nothing beside it but its checksum. A zip among
+        // other files is one of those files: a bundle can hold a zip that was lying in a folder the collector copied,
+        // and opening that in place of the bundle would show whatever its writer chose under the bundle's name.
+        const zipsGiven = given.filter((f) => !f.loose && /\.zip$/i.test(f.path));
+        if (zipsGiven.length > 1 && zipsGiven.length === given.length) throw new Error('Open one bundle at a time (several .zip files were given).');
+        const beside = zipsGiven.length === 1 ? `${basename(zipsGiven[0].path)}.sha256`.toLowerCase() : '';
+        zips = zipsGiven.length === 1 && given.every((f) => f === zipsGiven[0] || basename(f.path).toLowerCase() === beside) ? zipsGiven : [];
+        if (zips.length === 1) {
+          progress({ phase: 'Reading the zip directory' });
+          const file = zips[0].blob;
+          name = basename(zips[0].path).replace(/\.zip$/i, '');
+          for (const e of await readZip(file)) if (!clutter.test(e.path)) this.entries.push(new Entry(e.path, e.size, null, { file, e }));
+          found = bundleFolder(this.entries.map((en) => en.path));        // the same, for a zip made of that folder
+          if (found) this.entries = this.entries.filter((en, i) => !found.aside.has(i));
+        } else this.entries = given.map(asEntry);
       }
-      this.entries = this.entries.filter((en) => !/(^|\/)(__MACOSX\/|\.DS_Store$|\._[^/]*$)/.test(en.path));
       if (!this.entries.length) throw new Error('No files found in what was dropped.');
-      const root = this.entries[0].path.split('/')[0] + '/';       // strip the bundle's own top-level folder
-      if (this.entries.length > 1 ? this.entries.every((en) => en.path.startsWith(root)) : this.entries[0].path.startsWith(root)) {
-        for (const en of this.entries) en.path = en.path.slice(root.length);
-        if (!name || /^Excel_Diagnostics/.test(root)) name = root.slice(0, -1);
+      if (found) {
+        for (const en of this.entries) en.path = en.path.slice(found.prefix.length);
+        const folder = basename(found.prefix.slice(0, -1));
+        if (folder && (!name || /^Excel_Diagnostics/.test(folder))) name = folder;
+        if (found.aside.size) {
+          // Counts only: a note is read as this tool's own sentence, so it carries no name taken from the bundle
+          const nz = found.zips, ns = found.aside.size - nz, n = found.aside.size;
+          const what = [nz && `${nz} .zip file${nz === 1 ? '' : 's'}`, ns && `${ns} checksum file${ns === 1 ? '' : 's'}`].filter(Boolean).join(' and ');
+          notes.push(`This bundle was read from its folder. ${what} that came with it ${n === 1 ? 'was' : 'were'} not opened and ${n === 1 ? 'is' : 'are'} not among the files shown.`);
+        }
+      } else {
+        const root = this.entries[0].path.split('/')[0] + '/';       // strip the top-level folder everything is in
+        if (this.entries.length > 1 ? this.entries.every((en) => en.path.startsWith(root)) : this.entries[0].path.startsWith(root)) {
+          for (const en of this.entries) en.path = en.path.slice(root.length);
+          if (!name || /^Excel_Diagnostics/.test(root)) name = root.slice(0, -1);
+        }
       }
       this.entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
       this.name = name || (this.entries.length === 1 ? this.entries[0].path : 'Log files');
 
       // Which files are logs with timestamps? Decide from each candidate's first bytes.
       const paths = new Set(this.entries.map((en) => en.path));
-      const notes = [];
+      const collector = this.collector = paths.has('manifest.tsv') || paths.has('bundle_info.tsv');
       let skippedBaseline = 0;
       progress({ phase: 'Looking for log files' });
       for (const en of this.entries) {
         if (!en.size || !/\.(tsv|ndjson|log|txt)$|\.log\.[^/]*$/i.test(en.path)) continue;
         if (en.path.startsWith('repro/baseline/') && paths.has('repro/final/' + en.path.slice(15))) { skippedBaseline++; continue; }
-        const parser = sniff(this, en.path, LATIN1.decode(await en.head(4096)));
+        const head = LATIN1.decode(await en.head(4096));
+        let parser = sniff(this, en.path, head);
+        // In a collector's bundle the place decides what a file may be. The macOS log, the sleep and wake history and
+        // the install history are what the collector wrote where it writes them. A file anywhere else that looks like
+        // one of them was lying in a folder the collector copied: it is an ordinary log under its own name, and the
+        // Mac's time zone is not learned from it.
+        if (parser && collector && OWN_PLACE[parser.kind] && !OWN_PLACE[parser.kind].test(en.path)) parser = sniffText(this, en.path, head);
         if (parser) this.sources.push(new Source(this.sources.length, en, parser));
       }
       if (skippedBaseline) notes.push(`${skippedBaseline} log file(s) under repro/baseline are not on the timeline because repro/final holds a later copy of the same file.`);
@@ -512,8 +615,20 @@ const Core = (() => {
       this.zone.sort((a, b) => a[0] - b[0]);
       this.zone = this.zone.filter((z, i, all) => !i || z[1] !== all[i - 1][1]);     // keep only the moments the offset changed
       await this.addReports();
+      if (this.unread) notes.push(`${this.unread} line${this.unread === 1 ? '' : 's'} in this bundle's logs could not be read as ${this.unread === 1 ? 'an entry' : 'entries'} and ${this.unread === 1 ? 'is' : 'are'} not on the timeline.`);
       progress({ phase: 'Merging the timeline' });
       this.finalize();
+      {                                                   // each report's own row, so the page can go straight to it
+        const rs = this.sources.find((s) => s.parser.kind === 'report'), G = this.g;
+        if (rs) for (let i = 0; i < G.n; i++) if (G.F[i] === rs.id && this.reportList[G.R[i]]) this.reportList[G.R[i]].pos = i;
+      }
+      // When the bundle was collected, if it says. A time written without an offset can only be placed when the logs
+      // give the Mac's zone; without that it is left out, not guessed from the zone of whoever is looking.
+      const peek = async (path) => { const en = this.entries.find((e) => e.path === path); return en && en.size ? UTF8.decode(await en.head(16384)) : ''; };
+      const utc = /^collected_utc\t(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)/m.exec(await peek('bundle_info.tsv'));
+      const said = /^- Collected:\s*(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)/m.exec(await peek('summary.md'));
+      this.collected = utc ? isoAt(utc[1], 0) : said && this.zone.length ? this.localToUtc(isoAt(said[1], 0)) : NaN;
+      this.end = this.collected > this.t1 && this.g.n ? this.collected : this.t1;      // all time runs to the collection, so its mark can be seen
       const odl = this.entries.filter((en) => /\.(odl|odlgz|odlsent|aodl)$/i.test(en.path)).length;
       const offsets = [...new Set(this.zone.map((z) => z[1]))];
       if (offsets.length > 1) {
@@ -541,7 +656,9 @@ const Core = (() => {
         for (;;) {
           let e = s.indexOf('\n', p);
           if (e < 0) { if (!final || p >= n) break; e = n; }
-          if (e > p) parser.line(src, s, p, e, base + p);
+          // A line the parser cannot get through is left out and counted. It does not stop the file, or the bundle,
+          // from opening: load() says how many there were.
+          if (e > p) { try { parser.line(src, s, p, e, base + p); } catch (err) { if (err && err.noRoom) throw err; this.unread++; } }
           p = e + 1;
           if (p >= n) { p = Math.min(p, n); break; }
         }
@@ -578,51 +695,149 @@ const Core = (() => {
       src.cap = src.n;
     }
 
+    // Lays one crash, hang or other diagnostic report out as it was recorded: labelled facts from its header, the stack
+    // the report itself singles out (the thread it marks as crashed, or a hang's heaviest stack), and the images it
+    // lists. `what` is the short form that goes on the timeline, so those recorded words can be searched for there.
+    // Nothing is added to what the report says, and nothing in it is named as a cause.
+    // In a collector's bundle the place decides here too, for what only the collector or only the system writes.
+    // The collector's hang mode writes its capture of Excel at the top of the bundle: a file of that name in a folder
+    // that was copied from the Mac is not that capture, and is an ordinary file. Jetsam and panic reports are written
+    // by macOS into the system's report folder, which the collector copies to reports/Library_Logs_DiagnosticReports
+    // (and ..._Retired): a file anywhere else that says it is one is listed as a report of no particular kind.
+    // Both patterns below have one group, the capture's kind.
+    captureAt(path) { return (this.collector ? /^excel_(spindump|sample)\.txt$/i : /(?:^|\/)excel_(spindump|sample)\.txt$/i).exec(path); }
+    isReport(path) { return /\.(ips|crash|diag|hang|spin|panic|shutdownstall)$/i.test(path) || !!this.captureAt(path); }
+    async readReport(en, cap = 8 << 20) {
+      const file = basename(en.path), ext = (/\.(ips|crash|diag|hang|spin|panic|shutdownstall)$/i.exec(en.path) || [0, ''])[1].toLowerCase();
+      const capture = this.captureAt(en.path);            // taken by the collector's hang mode
+      let text = UTF8.decode(await en.head(8192));
+      const json = text[0] === '{';
+      if (en.size > 8192) text = UTF8.decode(await en.head(json ? cap : Math.min(cap, 1 << 20)));    // a JSON body has to be read whole to be read at all
+      const out = { path: en.path, t: NaN, proc: '', what: [], facts: [], stack: null, images: [], size: en.size, read: Math.min(en.size, json ? cap : Math.min(cap, 1 << 20)), headerOnly: false,
+        kind: capture ? cap1(capture[1]) : { ips: 'Report', crash: 'Crash', diag: 'Diag', hang: 'Hang', spin: 'Spin', panic: 'Panic', shutdownstall: 'Hang' }[ext] || 'Report' };
+      const fact = (label, value) => { value = value == null || value === false ? '' : String(value).replace(/\s+/g, ' ').trim(); if (value) out.facts.push([label, value]); return value; };
+      const join = (...parts) => parts.filter(Boolean).join(' ');
+      const stampOf = (str) => { const m = /(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) ?([-+]\d{4})/.exec(str || ''); return m ? isoAt(m[1], 0) - offStr(m[2]) * 60000 : NaN; };
+      let body = text, parsed = null;
+      if (json) {                                         // a one-line JSON header, then a JSON body (crash, jetsam) or a text one
+        const nl = text.indexOf('\n');
+        let h = null;
+        try { h = JSON.parse(nl > 0 ? text.slice(0, nl) : text); } catch (err) { /* not a header after all */ }
+        if (h && typeof h === 'object') {
+          body = nl > 0 ? text.slice(nl + 1) : '';
+          out.t = stampOf(h.timestamp); out.proc = h.app_name || h.name || '';
+          if (h.bug_type === '309' || h.bug_type === '109') out.kind = 'Crash';
+          else if (h.bug_type === '298') out.kind = 'Jetsam';
+          else if (h.bug_type === '288' || h.bug_type === '388') out.kind = 'Hang';
+          if (h.bug_type) out.what.push(`bug type ${h.bug_type}`);
+          if (h.app_version) out.what.push(`version ${h.app_version}`);
+          if (h.os_version) out.what.push(h.os_version);
+          fact('Report time', h.timestamp); fact('Report type', h.bug_type && `bug type ${h.bug_type}`);
+          fact('App', join(h.app_name || h.name, h.app_version && `version ${h.app_version}`, h.build_version && `(${h.build_version})`));
+          fact('macOS', h.os_version);
+          if (out.read >= en.size) { try { parsed = JSON.parse(body); } catch (err) { /* a text body, handled below */ } }
+          else if (/^\s*\{/.test(body)) { out.headerOnly = true; body = ''; }      // a JSON body too large to read whole: only its header line is laid out
+        }
+      }
+      if (parsed && typeof parsed === 'object') {
+        const b = parsed, ex = b.exception || {}, term = b.termination || {}, bi = b.bundleInfo || {};
+        const threads = Array.isArray(b.threads) ? b.threads : [], imgs = Array.isArray(b.usedImages) ? b.usedImages : [];
+        const who = (name, pid) => (name ? `${name}${pid != null ? ` [${pid}]` : ''}` : '');
+        fact('Process', who(b.procName, b.pid)); fact('Path', b.procPath);
+        fact('Version', join(bi.CFBundleShortVersionString, bi.CFBundleVersion && `(${bi.CFBundleVersion})`)); fact('Identifier', bi.CFBundleIdentifier);
+        fact('Launched', b.procLaunch); fact('Captured', b.captureTime);
+        fact('Mac model', b.modelCode); fact('Processor type', b.cpuType);
+        if ('translated' in b) fact('Running under Rosetta', b.translated ? 'yes' : 'no');
+        fact('Parent process', who(b.parentProc, b.parentPid)); fact('Responsible process', who(b.responsibleProc, b.responsiblePid));
+        fact('Exception type', join(ex.type, ex.signal && `(${ex.signal})`)); fact('Exception subtype', ex.subtype); fact('Exception codes', ex.codes);
+        fact('Termination', [term.namespace && `namespace ${term.namespace}`, term.code != null && `code ${term.code}`, term.indicator].filter(Boolean).join(', '));
+        fact('Termination reasons', Array.isArray(term.reasons) ? term.reasons.join('; ') : '');
+        fact('Terminated by', who(term.byProc, term.byPid));
+        if (b.asi && typeof b.asi === 'object') fact('Application-specific information', Object.entries(b.asi).map(([lib, said]) => `${lib}: ${[].concat(said).join(' ')}`).join(' | '));
+        const ft = Number.isInteger(b.faultingThread) ? b.faultingThread : threads.findIndex((t) => t && t.triggered), th = threads[ft];
+        const str = (v) => (v == null ? '' : String(v)), image = (im) => str((im || {}).name) || basename(str((im || {}).path));
+        out.images = imgs.slice(0, 3000).map((im) => ({ name: image(im), path: str((im || {}).path), version: str((im || {}).CFBundleShortVersionString), id: str((im || {}).CFBundleIdentifier), arch: str((im || {}).arch) }));
+        if (th && typeof th === 'object') {
+          // A crash report says which thread crashed. Other reports of the same shape only name a thread, so the page does no more.
+          const crash = out.kind === 'Crash';
+          fact(crash ? 'Thread marked as crashed' : 'Thread the report names', [String(ft), th.name && `"${th.name}"`, th.queue && `queue ${th.queue}`].filter(Boolean).join(', '));
+          const all = Array.isArray(th.frames) ? th.frames : [];
+          out.stack = { title: crash ? `Thread ${ft}, the one the report marks as crashed` : `Thread ${ft}, the one the report names`, more: Math.max(0, all.length - 200), frames: all.slice(0, 200).map((fr) => {
+            const f = fr && typeof fr === 'object' ? fr : {};
+            return { image: image(imgs[f.imageIndex]) || '?', symbol: str(f.symbol), offset: f.symbol ? (f.symbolLocation != null ? `+ ${f.symbolLocation}` : '') : (f.imageOffset != null ? `+ ${f.imageOffset}` : ''),
+              source: f.sourceFile ? `${f.sourceFile}${f.sourceLine ? `:${f.sourceLine}` : ''}` : '' };
+          }) };
+        }
+        if (threads.length) fact('Threads in the report', threads.length);
+        if (imgs.length) fact('Images listed', imgs.length);
+        if (b.largestProcess) { fact('Largest process, as recorded', b.largestProcess); out.what.push(`largest process ${b.largestProcess}`); }
+        if (Array.isArray(b.processes)) fact('Processes listed', b.processes.length);
+        if (ex.type) out.what.push(join(ex.type, ex.signal && `(${ex.signal})`));
+        if (ex.subtype) out.what.push(String(ex.subtype));
+        if (term.indicator) out.what.push(String(term.indicator));
+        if (out.stack && out.stack.frames.length) out.what.push(`thread ${ft}: ${out.stack.frames.slice(0, 6).map((f) => f.symbol || f.image).join(' < ')}`);
+      } else if (body) {                                  // a text report: the header lines Apple's reports use, and the stack block it leads with
+        const head = body.slice(0, 65536);
+        const get = (key) => ((new RegExp(`^${key.replace('/', '\\/')}:[ \\t]+(.+)$`, 'm').exec(head) || [])[1] || '').trim();
+        if (out.t !== out.t) out.t = stampOf(get('Date/Time'));
+        if (!out.proc) out.proc = (get('Command') || get('Process')).replace(/(?<!\s)\s+\[\d+\]$/, '');
+        for (const key of ['Process', 'Command', 'Path', 'Identifier', 'Version', 'Code Type', 'Architecture', 'Parent Process', 'Parent', 'Responsible', 'PID', 'Date/Time', 'End time', 'OS Version', 'Hardware model',
+          'Event', 'Action taken', 'CPU', 'Wakeups', 'Writes', 'Duration', 'Steps', 'Crashed Thread', 'Exception Type', 'Exception Codes', 'Exception Note', 'Termination Reason', 'Terminating Process',
+          'Time Awake Since Boot', 'Active cpus', 'Memory size', 'Free disk space', 'Advisory levels', 'Total CPU Time']) fact(key, get(key));
+        for (const key of ['Event', 'Exception Type', 'Termination Reason', 'Action taken', 'Duration', 'Crashed Thread']) { const v = get(key).replace(/\s+/g, ' '); if (v) out.what.push(`${key}: ${v}`); }
+        const start = /^Thread \d+ Crashed.*$|^[ \t]*Heaviest stack for .*$|^Call graph:[ \t]*$/m.exec(body);
+        if (start) {
+          const rest = body.slice(start.index + start[0].length).replace(/^\r?\n/, ''), block = rest.slice(0, (/\r?\n[ \t]*\r?\n/.exec(rest) || { index: rest.length }).index).split(/\r?\n/);
+          out.stack = { title: start[0].trim().replace(/:$/, ''), lines: block.slice(0, 150), more: Math.max(0, block.length - 150) };
+          // A few of its lines go on the timeline, so that a function name shown here can be searched for there. A
+          // crashed thread lists its innermost frame first; a heaviest stack and a call graph list it last.
+          const few = (/^Thread/.test(start[0]) ? block.slice(0, 6) : block.slice(-6)).map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+          if (few.length) out.what.push(`${out.stack.title}: ${few.join(' | ')}`.slice(0, 900));
+        }
+      }
+      if (/^JetsamEvent/i.test(file)) out.kind = 'Jetsam';
+      if (/^(ExcessiveResource|.*\.(cpu|wakeups|diskwrites)_resource)/i.test(file)) out.kind = 'Diag';
+      if (this.collector && (out.kind === 'Jetsam' || out.kind === 'Panic') && !SYSTEM_REPORTS.test(en.path)) out.kind = 'Report';
+      if (out.t !== out.t) {                              // no time inside: use the one in the file name, which is in the Mac's local time
+        const m = /(\d{4}-\d\d-\d\d)-(\d\d)(\d\d)(\d\d)/.exec(file);
+        if (m) out.t = this.localToUtc(isoAt(`${m[1]} ${m[2]}:${m[3]}:${m[4]}`, 0));
+      }
+      if (!out.proc) out.proc = capture ? 'Microsoft Excel' : file.replace(/[-_.]20\d\d-.*$/, '').replace(/\.[a-z]+$/i, '');
+      return out;
+    }
+    async report(path) {                                // one report, for the page's Reports tab
+      const en = this.entries.find((e) => e.path === path);
+      if (!en) throw new Error(`There is no file ${path} in this bundle.`);
+      if (this.isReport(path)) return this.readReport(en);
+      const listed = this.reportList.find((r) => r.path === path) || {};
+      return { path, t: listed.t, proc: listed.proc || '', kind: listed.kind || 'Report', what: [], facts: [], stack: null, images: [], size: en.size, read: en.size };
+    }
+
     async addReports() {                                // crash, hang and diagnostic reports become timeline events
       const lines = [];
       const add = (t, kind, proc, path, what) => {
         if (t !== t) return;
-        lines.push(`${stamp(t)}\t${kind}\t${proc}\t${path}\t${what.replace(/[\t\r\n]+/g, ' ')}`);
-        this.reportList.push({ t, kind, proc, path });   // also handed to the page, which marks them on the memory charts
+        // One report is one line here, whatever its name, its process name or its path holds: a line break or a tab
+        // in one of them would otherwise make a row of its own, with a time, a kind and a file of the writer's choosing
+        const one = (s) => String(s).replace(/[\t\r\n]+/g, ' ');
+        what = one(what); kind = one(kind); proc = one(proc);
+        lines.push(`${stamp(t)}\t${kind}\t${proc}\t${one(path)}\t${what}`);
+        this.reportList.push({ t, kind, proc, path, what });      // also handed to the page, for its Reports tab and the marks on its charts
       };
       for (const en of this.entries) {
-        const ext = (/\.(ips|crash|diag|hang|spin|panic|shutdownstall)$/i.exec(en.path) || [0, ''])[1].toLowerCase();
         const file = basename(en.path);
-        if (ext) {
-          const head = UTF8.decode(await en.head(8192));
-          let t = NaN, proc = '', what = [], kind = { ips: 'Report', crash: 'Crash', diag: 'Diag', hang: 'Hang', spin: 'Spin', panic: 'Panic', shutdownstall: 'Hang' }[ext];
-          const stampOf = (str) => { const m = /(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) ?([-+]\d{4})/.exec(str || ''); return m ? isoAt(m[1], 0) - offStr(m[2]) * 60000 : NaN; };
-          if (head[0] === '{') {
-            try {
-              const j = JSON.parse(head.slice(0, head.indexOf('\n') > 0 ? head.indexOf('\n') : head.length));
-              t = stampOf(j.timestamp); proc = j.app_name || j.name || '';
-              if (j.bug_type === '309' || j.bug_type === '109') kind = 'Crash';
-              else if (j.bug_type === '298') kind = 'Jetsam';
-              else if (j.bug_type === '288' || j.bug_type === '388') kind = 'Hang';
-              if (j.bug_type) what.push(`bug type ${j.bug_type}`);
-              if (j.app_version) what.push(`version ${j.app_version}`);
-              if (j.os_version) what.push(j.os_version);
-            } catch (err) { /* fall through to the filename */ }
-          } else {
-            t = stampOf((/^Date\/Time:\s+(.+)$/m.exec(head) || [])[1]);
-            proc = ((/^(?:Command|Process):\s+(.+?)(?:\s+\[\d+\])?\s*$/m.exec(head)) || [0, ''])[1];
-            for (const key of ['Event', 'Exception Type', 'Termination Reason', 'Action taken', 'Duration']) {
-              const m = new RegExp(`^${key}:\\s+(.+)$`, 'm').exec(head);
-              if (m) what.push(`${key}: ${m[1].trim()}`);
-            }
-          }
-          if (/^JetsamEvent/i.test(file)) kind = 'Jetsam';
-          if (/^(ExcessiveResource|.*\.(cpu|wakeups|diskwrites)_resource)/i.test(file)) kind = 'Diag';
-          if (t !== t) {                                // no timestamp inside: use the one in the file name (Mac local time)
+        if (this.isReport(en.path)) {
+          let r;                                         // a report this cannot make sense of is still listed, by its file name
+          try { r = await this.readReport(en); } catch (err) { r = null; }
+          if (!r) {
             const m = /(\d{4}-\d\d-\d\d)-(\d\d)(\d\d)(\d\d)/.exec(file);
-            if (m) t = this.localToUtc(isoAt(`${m[1]} ${m[2]}:${m[3]}:${m[4]}`, 0));
+            r = { t: m ? this.localToUtc(isoAt(`${m[1]} ${m[2]}:${m[3]}:${m[4]}`, 0)) : NaN, kind: 'Report', proc: file.replace(/[-_.]20\d\d-.*$/, '').replace(/\.[a-z]+$/i, ''), what: ['could not be read as a report'] };
           }
-          if (!proc) proc = file.replace(/[-_.]20\d\d-.*$/, '').replace(/\.[a-z]+$/i, '');
-          add(t, kind, proc, en.path, what.join('; '));
+          add(r.t, r.kind, r.proc, en.path, r.what.join('; '));
         } else if (/CrashReporter\/[^/]+\.txt$/i.test(en.path)) {
           const text = UTF8.decode(await en.head(4096));
           for (const m of text.matchAll(/"ForceQuitDate" => (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([-+]\d{4})/g)) {
-            add(isoAt(m[1], 0) - offStr(m[2]) * 60000, 'Force quit', file.replace(/_[0-9A-F-]{36}\.txt$/i, ''), en.path, 'last time the user force-quit this app');
+            add(isoAt(m[1], 0) - offStr(m[2]) * 60000, 'Force quit', file.replace(/_(?:[0-9A-F-]{36}|redacted-hardware-uuid)\.txt$/i, ''), en.path, 'last time the user force-quit this app');
           }
         }
       }
@@ -658,29 +873,51 @@ const Core = (() => {
         src.t1 = n ? t[src.perm ? src.perm[n - 1] : n - 1] : NaN;
         N += n;
       }
-      const G = this.g = { n: N, T: new Float64Array(N), F: new Uint16Array(N), R: new Uint32Array(N), L: new Uint8Array(N),
+      // F is the number of the file a row came from. There can be more files than sixteen bits count: a copied folder
+      // may hold any number of small logs, and a number that wrapped would show a row under another file's name and text.
+      const G = this.g = { n: N, T: new Float64Array(N), F: new Uint32Array(N), R: new Uint32Array(N), L: new Uint8Array(N),
         P: new Uint16Array(N), PID: new Int32Array(N), S: new Uint16Array(N), C: new Uint16Array(N), G: new Uint16Array(N) };
-      // k-way merge by time. Files are mostly disjoint in time, so copy runs from one file while it stays the earliest.
-      const cur = new Uint32Array(S.length);
-      const key = (f) => { const s = S[f], c = cur[f]; return c < s.n ? s.t[s.perm ? s.perm[c] : c] : Infinity; };
-      let o = 0;
-      while (o < N) {
-        let m = -1, mk = Infinity, m2 = -1, k2 = Infinity;
-        for (let f = 0; f < S.length; f++) {
-          const k = key(f);
-          if (k < mk) { m2 = m; k2 = mk; m = f; mk = k; } else if (k < k2) { m2 = f; k2 = k; }
+      // k-way merge by time, then by file number. Files are mostly disjoint in time, so rows are copied in runs from one
+      // file while it stays the earliest. A heap of the files, ordered by each one's next time, gives that file and the
+      // one after it, so the work for a run does not grow with the number of files.
+      const cur = new Uint32Array(S.length), next = new Float64Array(S.length), heap = new Uint32Array(S.length);
+      const key = (f) => { const s = S[f], c = cur[f]; return s.t[s.perm ? s.perm[c] : c]; };
+      const before = (a, b) => next[a] < next[b] || (next[a] === next[b] && a < b);
+      let hn = 0;
+      const sink = (i) => {                               // move the file at i down to where the heap's order holds
+        const f = heap[i];
+        for (;;) {
+          let c = 2 * i + 1;
+          if (c >= hn) break;
+          if (c + 1 < hn && before(heap[c + 1], heap[c])) c++;
+          if (!before(heap[c], f)) break;
+          heap[i] = heap[c]; i = c;
         }
-        if (m < 0) break;
+        heap[i] = f;
+      };
+      const rise = (i) => {
+        const f = heap[i];
+        while (i > 0) { const up = (i - 1) >> 1; if (!before(f, heap[up])) break; heap[i] = heap[up]; i = up; }
+        heap[i] = f;
+      };
+      for (let f = 0; f < S.length; f++) if (S[f].n) { next[f] = key(f); heap[hn] = f; rise(hn++); }
+      let o = 0;
+      while (hn) {
+        const m = heap[0];
+        heap[0] = heap[--hn];
+        if (hn) sink(0);
+        const m2 = hn ? heap[0] : -1, k2 = hn ? next[m2] : Infinity;      // the file that comes next, and its time
         const s = S[m], perm = s.perm, n = s.n, t = s.t;
         let c = cur[m];
-        for (; c < n; c++) {
+        do {                                              // the heap's first file always gives at least one row
           const r = perm ? perm[c] : c, tv = t[r];
-          if (tv > k2 || (tv === k2 && m2 < m)) break;
           G.T[o] = tv; G.F[o] = m; G.R[o] = r; G.L[o] = s.lvl[r]; G.P[o] = s.proc[r]; G.PID[o] = s.pid[r];
           G.S[o] = s.sub[r]; G.C[o] = s.cat[r]; G.G[o] = s.tags[r];
-          o++;
-        }
+          o++; c++;
+          if (c < n) { const tn = t[perm ? perm[c] : c]; if (tn > k2 || (tn === k2 && m2 < m)) break; }
+        } while (c < n);
         cur[m] = c;
+        if (c < n) { next[m] = key(m); heap[hn] = m; rise(hn++); }
       }
       for (const s of S) { s.t = s.lvl = s.proc = s.pid = s.sub = s.cat = s.tags = s.perm = null; }
       this.t0 = N ? G.T[0] : 0;
@@ -689,7 +926,10 @@ const Core = (() => {
       this.lvlSev = Uint8Array.from(D.lvl.names, sevOf);
       const order = ['unified', 'office', 'report', 'autoupdate', 'onedrive', 'install', 'power', 'text'];
       this.groups = [...new Set(S.slice().sort((a, b) => order.indexOf(a.parser.kind) - order.indexOf(b.parser.kind)).map((s) => s.parser.group))];
-      this.srcGroup = Uint16Array.from(S, (s) => this.groups.indexOf(s.parser.group));
+      // A copied folder can give any number of groups (Excel-format logs in each of its app folders are a group of their
+      // own), so each file's group is looked up in a map made once, and kept in as many bits as the file number it is read by
+      const groupNo = new Map(this.groups.map((g, i) => [g, i]));
+      this.srcGroup = Uint32Array.from(S, (s) => groupNo.get(s.parser.group));
       this.facets = [
         { name: 'sev', col: G.L, table: this.lvlSev, n: SEV.length },
         { name: 'group', col: G.F, table: this.srcGroup, n: this.groups.length },
@@ -707,7 +947,7 @@ const Core = (() => {
       const main = this.sources.filter((s) => s.n && (s.parser.kind === 'unified' || s.parser.kind === 'office'));
       const focus = main.length ? [Math.min(...main.map((s) => s.t0)) - 60000, Math.max(...main.map((s) => s.t1)) + 60000] : null;
       return {
-        name: this.name, total: this.g.n, t0: this.t0, t1: this.t1, zone: this.zone, notes,
+        name: this.name, total: this.g.n, t0: this.t0, t1: this.t1, end: this.end, zone: this.zone, notes,
         focus: focus && focus[1] - focus[0] < 0.8 * (this.t1 - this.t0) ? focus : null,
         files: this.entries.map((en, i) => { const s = srcOf.get(en); return { i, path: en.path, size: en.size, src: s ? s.id : -1, rows: s ? s.n : 0 }; }),
         sources: this.sources.map((s) => ({ id: s.id, path: s.path, kind: s.parser.kind, group: s.parser.group, short: s.parser.short, rows: s.n, t0: s.t0, t1: s.t1, size: s.entry.size, virtual: !!s.entry.virtual })),
@@ -715,6 +955,132 @@ const Core = (() => {
         lvlSev: Array.from(this.lvlSev), reports: this.reportList,
       };
     }
+    // What the bundle records about the Mac and about the collection itself, as labelled facts: [{ label, value, path }],
+    // where path is the file each was read from. bundle_info.tsv is used when the collector wrote one; otherwise the
+    // same facts are picked out of the command output that older collectors saved. Nothing is worked out or judged.
+    async facts() {
+      const read = async (path) => { const en = this.entries.find((e) => e.path === path); return en && en.size ? UTF8.decode(await en.head(131072)) : ''; };
+      const pick = (text, rx) => ((rx.exec(text) || [])[1] || '').trim();
+      const out = [], add = (label, value, path) => { value = String(value || '').replace(/\s+/g, ' ').trim(); if (value) out.push({ label, value, path: path || '' }); };
+      const B = 'bundle_info.tsv', SUM = 'summary.md', SYS = 'system/system_info.txt', VER = 'office/versions.txt', MAN = 'manifest.tsv';
+      const bi = new Map((await read(B)).split(/\r?\n/).map((l) => l.split('\t')).filter((f) => f.length >= 2 && f[1]).map((f) => [f[0], f.slice(1).join(' ')]));
+      const short = (text) => text.split('\n').filter((l) => l.length <= 400).join('\n');       // the patterns below are for lines of ordinary length
+      const sum = await read(SUM), sys = short(await read(SYS)), ver = await read(VER), man = await read(MAN);
+      const both = (a, b) => (a && b ? `${a} (${b})` : a || b || '');
+      const first = (...tries) => tries.find((t) => t[0]) || ['', ''];      // the first source that has the fact: [value, path]
+
+      add('Collected', ...first([both(bi.get('collected_local'), bi.get('collected_utc') && `${bi.get('collected_utc')} UTC`), B], [pick(sum, /^- Collected:\s*(.+)$/m), SUM], [pick(sys, /^=== Collected ===\r?\n(.+)$/m), SYS]));
+      add('Collector mode', ...first([bi.get('mode'), B], [pick(sum, /^- Mode:\s*(.+)$/m), SUM], [pick(this.name, /^Excel_Diagnostics_(collect|hang|repro|watch)_/), '']));
+      add('Log search window', pick(sum, /^- Incident window:\s*(.+)$/m), SUM);
+      const version = first([bi.get('collector_version'), B], [pick(sum, /^- Collector version:\s*(.+)$/m), SUM]);
+      if (man || sum) add('Collector version', version[0] || 'not recorded in this bundle (collectors before 1.5.0 did not write it)', version[1]);
+      // Before 1.5.0 the collector replaced only home folder names and email addresses, so its row is not called "names hidden"
+      const red = /^redaction\t([^\t\n]*)\t?([^\n]*)$/m.exec(man);
+      if (man) add(red && !version[0] ? 'Redaction, as the collector recorded it' : 'Names hidden', red ? `${red[1]}: ${red[2]}` : 'not asked for', MAN);
+      add('macOS', ...first([both(bi.get('macos_version'), bi.get('macos_build')), B], [both(pick(sys, /^ProductVersion:\s*(.+)$/m), pick(sys, /^BuildVersion:\s*(.+)$/m)), SYS]));
+      add('Mac', ...first([both(bi.get('model_name'), bi.get('model_identifier')), B], [both(pick(sys, /^[ \t]*Model Name:\s*(.+)$/m), pick(sys, /^[ \t]*Model Identifier:\s*(.+)$/m)), SYS]));
+      const cores = pick(sys, /^[ \t]*Total Number of Cores:\s*(.+)$/m);
+      add('Processor', ...first([bi.get('chip'), B], [[pick(sys, /^[ \t]*(?:Chip|Processor Name):\s*(.+)$/m), cores && cores.replace(/^(\d+)/, '$1 cores')].filter(Boolean).join(', '), SYS]));
+      add('Memory installed', ...first([bi.get('memory'), B], [pick(sys, /^[ \t]*Memory:\s*(.+)$/m), SYS]));
+      const df = /^\S+\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+%)\s.*\s(\/System\/Volumes\/Data|\/)\s*$/m.exec(sys.split('\n').filter((l) => /\/System\/Volumes\/Data\s*$/.test(l)).concat(sys.split('\n').filter((l) => /\s\/\s*$/.test(l)))[0] || '');
+      if (df) add('Startup disk', `${df[3]} available of ${df[1]}, ${df[4]} of capacity in use (${df[5]})`, SYS);
+      const up = /\bup\s+(.+?),\s+\d+\s+users?,\s+load averages?:\s*(.+)$/m.exec(sys);
+      if (up) { add('Uptime when collected', up[1], SYS); add('Load averages when collected', `${up[2].trim()} (over 1, 5 and 15 minutes)`, SYS); }
+      add('Excel', ...first([both(bi.get('excel_version'), bi.get('excel_build')), B], [pick(ver, /^Microsoft Excel:\s*(.+)$/m), VER]));
+      const others = [...ver.matchAll(/^(Microsoft (?:Word|PowerPoint|Outlook|Teams)|OneDrive):\s*(.+)$/gm)].map((m) => `${m[1].replace(/^Microsoft /, '')} ${m[2].trim()}`);
+      add('Other Office apps', others.join(', '), VER);
+      return out;
+    }
+
+    // Things the bundle records that are worth seeing against the count of entries over time, for the page's main chart:
+    //   marks    moments: each report, the first entry from each Excel process, restarts and shutdowns, install activity,
+    //            and when the bundle was collected
+    //   asleep   each sleep in the sleep and wake history, for as long as its own line says it lasted
+    //   cover    the spans the macOS log and Excel's own logs in the bundle cover, so that a stretch with no entries
+    //            can be told apart from a stretch the bundle has no log for
+    // Each is a recorded time or a span between two recorded times. Nothing is inferred about why.
+    async marks() {
+      if (this.markCache) return this.markCache;
+      const G = this.g, D = this.dict, S = this.sources, kindOf = S.map((s) => s.parser.kind);
+      const out = { marks: [], asleep: [], cover: { unified: [], office: [] }, collected: this.collected, searched: false };
+      const read = async (path) => { const en = this.entries.find((e) => e.path === path); return en && en.size ? UTF8.decode(await en.head(65536)) : ''; };
+      for (const r of this.reportList) out.marks.push({ t: r.t, kind: 'report', text: r.kind === 'Force quit' ? `Force quit recorded: ${r.proc}` : `${r.kind === 'Report' ? 'Report' : `${r.kind} report`}: ${r.proc}` });
+
+      const xl = D.proc.map.get('Microsoft Excel'), runs = new Map(), power = [], installs = [];
+      for (let i = 0; i < G.n; i++) {
+        const k = kindOf[G.F[i]];
+        if (k === 'power') power.push([G.T[i], D.cat.names[G.C[i]]]);
+        else if (k === 'install') installs.push(G.T[i]);
+        else if (G.P[i] === xl && G.PID[i] > 0 && (k === 'unified' || k === 'office')) {
+          const run = runs.get(G.PID[i]);
+          if (run) run.t1 = G.T[i]; else if (runs.size < 500) runs.set(G.PID[i], { t: G.T[i], t1: G.T[i] });
+        }
+      }
+      for (const [pid, run] of runs) out.marks.push({ t: run.t, t1: run.t1, kind: 'excel', text: `First entry from Microsoft Excel with process ID ${pid}` });
+      for (const [t, what] of power) if (what === 'Start' || what === 'Shutdown' || what === 'Restart') out.marks.push({ t, kind: 'power', text: `${what}, in the sleep and wake history` });
+      for (const s of S) {                                // a Sleep line ends with how long that sleep lasted: "... 7699 secs"
+        if (kindOf[s.id] !== 'power') continue;
+        // Line by line, and only lines of ordinary length: one pattern over the whole file is slow on a long line.
+        // The start of the line is matched by itself and the length is read back from the line's end, digit by digit:
+        // one pattern for both tries every place in the line where the number might begin.
+        for (const line of UTF8.decode(await s.entry.head(8 << 20)).split('\n')) {
+          const m = line.length > 400 ? null : /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([-+]\d{4}) Sleep\s/.exec(line);
+          if (!m) continue;
+          const text = line.trimEnd();                    // spaces after "secs" are not part of it
+          if (!text.endsWith(' secs')) continue;
+          const end = text.length - 5;
+          let from = end;
+          while (from > m[0].length && text.charCodeAt(from - 1) >= 48 && text.charCodeAt(from - 1) <= 57) from--;
+          const secs = +text.slice(from, end), t = isoAt(m[1], 0) - offStr(m[2]) * 60000;
+          if (from < end && t === t && secs > 0) out.asleep.push([t, t + secs * 1000]);
+        }
+      }
+      for (let i = 0; i < installs.length;) {             // install history lines come in bursts: one mark for each burst
+        let j = i;
+        while (j + 1 < installs.length && installs[j + 1] - installs[j] <= 600000) j++;
+        out.marks.push({ t: installs[i], t1: installs[j], kind: 'install', text: `Install history: ${j - i + 1} ${j === i ? 'line that mentions' : 'lines that mention'} Microsoft, Excel or Office` });
+        i = j + 1;
+      }
+
+      if (out.collected === out.collected) out.marks.push({ t: out.collected, kind: 'collected', text: 'This bundle was collected' });
+
+      // The macOS log is collected a day at a time, and each file covers at least from its first entry to its last.
+      // Where the collector recorded that a day's search ran to the end ("ok (N entries)"), that day is covered to
+      // its end, or to the moment of collection, however few entries it holds; and from its start as well when the
+      // bundle has macOS log entries from before that day, which shows macOS still had logs that far back.
+      const status = new Map((await read('unified_logs/collection_status.txt')).split(/\r?\n/).map((l) => /^(\d{4}-\d\d-\d\d) \| (.*)$/.exec(l)).filter(Boolean).map((m) => [m[1], m[2]]));
+      const manifest = await read('manifest.tsv');
+      const unified = S.filter((s) => s.n && kindOf[s.id] === 'unified'), earliest = Math.min(...unified.map((s) => s.t0));
+      const end = out.collected === out.collected ? out.collected : this.t1;
+      for (const s of unified) {
+        const day = (/(?:^|\/)unified_logs\/(\d{4}-\d\d-\d\d)\.[a-z]+$/.exec(s.path) || [])[1];
+        if (day && /^ok \(/.test(status.get(day) || '')) {
+          const start = isoAt(`${day} 00:00:00`, 0), from = this.localToUtc(start);
+          out.cover.unified.push([earliest < from ? from : s.t0, Math.max(s.t1, Math.min(this.localToUtc(start + 86400000), end))]);
+        } else if (/(?:^|\/)unified_last30m\.[a-z]+$/.test(s.path) && /^unified_last30m\tcomplete\b/m.test(manifest)) {
+          out.cover.unified.push([Math.min(s.t0, end - 1800000), Math.max(s.t1, end)]);      // a hang capture searches the half hour before it
+        } else out.cover.unified.push([s.t0, s.t1]);
+      }
+      // A day that was searched to the end and held nothing has no file, but was covered all the same, provided
+      // the bundle shows macOS still had logs that far back.
+      for (const [day, st] of status) {
+        const start = isoAt(`${day} 00:00:00`, 0), from = this.localToUtc(start);
+        if (/^ok, nothing found/.test(st) && earliest < from) out.cover.unified.push([from, Math.min(this.localToUtc(start + 86400000), Math.max(end, from))]);
+      }
+      // The collector looked for macOS logs, whatever it got: with none at all, the whole chart is a stretch without them
+      out.searched = status.size > 0 || /unified_logs\/collection_status\.txt|access check \|/.test([...status.values()].join('\n')) || /^unified_(?:logs|last30m)\t/m.test(manifest) || this.entries.some((e) => /(?:^|\/)unified_logs\/collection_status\.txt$/.test(e.path));
+      const office = S.filter((s) => s.n && kindOf[s.id] === 'office' && s.parser.group === 'Excel diagnostics');
+      if (office.length) out.cover.office.push([Math.min(...office.map((s) => s.t0)), Math.max(...office.map((s) => s.t1))]);
+      const merge = (list) => {                           // sorted, with touching and overlapping spans joined
+        const res = [];
+        for (const [a, b] of list.filter(([a, b]) => a === a && b >= a).sort((x, y) => x[0] - y[0])) { const last = res[res.length - 1]; if (last && a <= last[1] + 1000) last[1] = Math.max(last[1], b); else res.push([a, b]); }
+        return res;
+      };
+      out.cover.unified = merge(out.cover.unified); out.cover.office = merge(out.cover.office); out.asleep = merge(out.asleep);
+      out.marks = out.marks.filter((m) => m.t === m.t).sort((a, b) => a.t - b.t);
+      return (this.markCache = out);
+    }
+
     tagTimes(name, nb) {                                // when entries carrying a tag occur: counts per time bin across their own span
       const G = this.g, bit = this.tagNames.indexOf(name), bins = new Array(nb).fill(0);
       let first = -1, last = -1, total = 0;
@@ -748,7 +1114,8 @@ const Core = (() => {
         const w = word.replace(/^-/, '');
         let m2;
         if (/^(level|lvl|sev|severity|process|proc|pid|subsystem|sub|area|category|cat|tag|source|src|file):$/i.test(w)) {
-          out.notes.push({ text: `"${w}" has nothing after the colon, so it was searched for as plain text. Write the value straight after it with no space, for example ${w.toLowerCase()}${w.toLowerCase() === 'pid:' ? '4121' : 'excel'}.` });
+          const eg = { level: 'error', pid: '4121', tag: 'memory', source: 'unified' }[FIELD[w.slice(0, -1).toLowerCase()]] || 'excel';
+          out.notes.push({ text: `"${w}" has nothing after the colon, so it was searched for as plain text. Write the value straight after it with no space, for example ${w.toLowerCase()}${eg}.` });
         } else if ((m2 = /^([a-z_]+):(.+)$/i.exec(w))) {
           const guess = near(m2[1].toLowerCase());
           out.notes.push({ soft: !guess, text: `"${m2[1]}:" is not a field, so "${w}" was searched for as plain text. ${guess ? `Did you mean ${guess}:${m2[2]}? ` : ''}The fields are ${FIELDS_SAID}` });
@@ -855,12 +1222,15 @@ const Core = (() => {
         const list = (names) => names.filter(Boolean).slice(0, 24).join(', ');
         const like = (names) => { const hit = names.filter((nm) => nm && v.length >= 3 && nm.toLowerCase().includes(v.slice(0, 3))).slice(0, 8); return hit.length ? `Names here that are close: ${hit.join(', ')}.` : ''; };
         if (t.field === 'pid') { if (p.eq !== p.eq) c.notes.push({ text: `${t.said}: pid: needs a number, for example pid:4121, so ${effect}.` }); }
-        else if (t.field === 'tag') { if (!p.mask) c.notes.push({ text: `${t.said}: no tag in this bundle contains "${v}", so ${effect}. The tags here are ${list(this.tagNames)}.` }); }
+        // plain: the same note without the names taken from the bundle, for a reader that must not be handed a
+        // sentence the bundle helped to write (the request layer, whose reader is a model); names: which list it left out
+        else if (t.field === 'tag') { if (!p.mask) { const plain = `${t.said}: no tag in this bundle contains "${v}", so ${effect}.`; c.notes.push({ plain, names: 'tag', text: `${plain} The tags here are ${list(this.tagNames)}.` }); } }
         else if (!p.table.some((x) => x)) {
           const where = { level: `The levels here are ${list([...new Set(SEV.concat(D.lvl.names))])}. level: matches from the start of the name.`,
             process: like(D.proc.names), subsystem: like(D.sub.names), category: like(D.cat.names), source: `The sources here are ${list(this.groups)}; source: also matches file paths.` }[t.field];
           // field: lets the page or the command line add where its own list of these names is
-          c.notes.push({ field: t.field, text: `${t.said}: no ${t.field} in this bundle ${t.field === 'level' ? 'starts with' : 'contains'} "${v}", so ${effect}.${where ? ' ' + where.trim() : ''}` });
+          const plain = `${t.said}: no ${t.field} in this bundle ${t.field === 'level' ? 'starts with' : 'contains'} "${v}", so ${effect}.`;
+          c.notes.push({ field: t.field, plain, names: t.field, text: `${plain}${where ? ' ' + where.trim() : ''}` });
         }
       }
 
@@ -899,7 +1269,7 @@ const Core = (() => {
         skipped = fileOk.map((ok, f) => !ok && hi[f] >= 0);     // deselected files were not searched: their counts are unknown
       }
 
-      const nb = Math.max(1, q.bins | 0 || 120), h0 = q.t0 != null ? q.t0 : this.t0, h1 = q.t1 != null ? q.t1 : this.t1 + 1;
+      const nb = Math.max(1, q.bins | 0 || 120), h0 = q.t0 != null ? q.t0 : this.t0, h1 = q.t1 != null ? q.t1 : this.end + 1;
       const hist = new Uint32Array(nb * 3), scale = nb / Math.max(1, h1 - h0), lvlSev = this.lvlSev;
       const only = q.only ? Uint32Array.from(q.only).filter((i) => i >= i0 && i < i1) : null;
       const view = new Uint32Array(only ? only.length : i1 - i0);
@@ -969,7 +1339,9 @@ const Core = (() => {
         }
       }));
       return items.map((it) => {
-        const i = it.i, text = it.text.replace(/[\r\n\0]+$/, ''), f = this.sources[it.s].parser.fields(text);
+        let end = it.text.length;                           // line ends and NULs off the end, counted from the end
+        for (; end > 0; end--) { const c = it.text.charCodeAt(end - 1); if (c !== 13 && c !== 10 && c !== 0) break; }
+        const i = it.i, text = end === it.text.length ? it.text : it.text.slice(0, end), f = this.sources[it.s].parser.fields(text);
         return { row: [i, G.T[i], G.F[i], G.L[i], G.P[i], G.PID[i], G.S[i], G.C[i], G.G[i], f.msg, it.full > it.len ? 1 : 0], extra: f.extra, raw: text, off: it.off };
       });
     }
@@ -990,7 +1362,13 @@ const Core = (() => {
       return -1;
     }
     async exportTsv(progress, positions) {              // the current view, or just the given entries
-      const run = this.run, v = positions ? Uint32Array.from(positions) : this.view, names = this.info([]).names, clean = (s) => String(s).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\r?\n/g, '\\n');
+      const run = this.run, v = positions ? Uint32Array.from(positions) : this.view, names = this.info([]).names;
+      // One entry is one row: a tab, a line feed and a carriage return in a field are written as \t, \n and \r. A field
+      // that begins with = + - or @ gets an apostrophe in front, because a spreadsheet would run it as a formula. So
+      // does one that begins with a quotation mark: a spreadsheet reads on from there to the next quotation mark,
+      // across tabs and line ends, and every entry in between would land inside that one cell.
+      const clean = (s) => { s = String(s).replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\r?\n/g, '\\n').replace(/\r/g, '\\r'); return /^[=+\-@"]/.test(s) ? `'${s}` : s; };
+
       const parts = ['utc_time\tseverity\tlevel\tsource\tprocess\tpid\tsubsystem\tcategory\ttags\tmessage\n'];
       for (let start = 0; start < v.length; start += 2000) {
         if (run !== this.run) throw new Error('superseded');
@@ -1092,15 +1470,33 @@ const Core = (() => {
       A.push(`${local(t, 0)} [Microsoft Update Assistant] <${i % 13 === 5 ? 'Warning' : 'Info'}> ${i % 13 === 5 ? 'CriticalSecurityUpdates.Manifest: {"Error":"Unable to retrieve security manifest. Error: -1100","Operation":"Download"}' : 'NOT.COLLECTED: {"Payload":"Checking for updates"}'}`);
     }
     add('office/autoupdate.log', A.join('\n') + '\n');
-    add('system/sleep_wake.txt', `${local(base + 20e3, 0)} -0400 Wake                \tWake from Deep Idle [CDNVA] : due to EC.LidOpen/Lid Open\t\n${local(base + span - 600e3, 0)} -0400 Sleep               \tEntering Sleep state due to 'Clamshell Sleep'\t\n`);
+    add('system/sleep_wake.txt', `${local(base + 20e3, 0)} -0400 Wake                \tWake from Deep Idle [CDNVA] : due to EC.LidOpen/Lid Open\t\n${local(base + span - 600e3, 0)} -0400 Sleep               \tEntering Sleep state due to 'Clamshell Sleep':TCPKeepAlive=active Using AC (Charge:100%) 540 secs  \n`);
+    const xlPath = '/Applications/Microsoft Excel.app/Contents/MacOS/Microsoft Excel';
     add('reports/user_Library_Logs_DiagnosticReports/Microsoft Excel-2026-03-10-103500.ips',
-      `{"app_name":"Microsoft Excel","timestamp":"${local(crash, 0)}.00 -0400","app_version":"16.114","bug_type":"309","os_version":"macOS 15.7.8 (24G824)","name":"Microsoft Excel"}\n{\n  "exception" : {"type":"EXC_BAD_ACCESS","signal":"SIGSEGV","subtype":"KERN_INVALID_ADDRESS at 0x0000000000000018"},\n  "faultingThread" : 0,\n  "threads" : [{"triggered":true,"frames":[{"symbol":"PivotFilterApply","imageIndex":0},{"symbol":"PivotTableUpdate","imageIndex":0}]}]\n}\n`);
-    add('reports/crash_summary.txt', `# Crash and hang report summary\n\n## reports/user_Library_Logs_DiagnosticReports/Microsoft Excel-2026-03-10-103500.ips\n"procName":"Microsoft Excel"\n"exception":"EXC_BAD_ACCESS"\n`);
+      `{"app_name":"Microsoft Excel","timestamp":"${local(crash, 0)}.00 -0400","app_version":"16.114","build_version":"16.114.26030814","bug_type":"309","os_version":"macOS 15.7.8 (24G824)","name":"Microsoft Excel"}\n` +
+      JSON.stringify({ procName: 'Microsoft Excel', pid: 4121, procPath: xlPath, cpuType: 'ARM-64', translated: false, modelCode: 'MacBookPro18,1', parentProc: 'launchd', parentPid: 1,
+        bundleInfo: { CFBundleShortVersionString: '16.114', CFBundleVersion: '16.114.26030814', CFBundleIdentifier: 'com.microsoft.Excel' },
+        exception: { codes: '0x0000000000000001, 0x0000000000000018', type: 'EXC_BAD_ACCESS', signal: 'SIGSEGV', subtype: 'KERN_INVALID_ADDRESS at 0x0000000000000018' },
+        termination: { flags: 0, code: 11, namespace: 'SIGNAL', indicator: 'Segmentation fault: 11', byProc: 'exc handler', byPid: 4121 }, faultingThread: 0,
+        threads: [{ id: 90011, queue: 'com.apple.main-thread', triggered: true, frames: [{ imageOffset: 77840, symbol: 'PivotFilterApply', symbolLocation: 532, imageIndex: 0 }, { imageOffset: 75732, symbol: 'PivotTableUpdate', symbolLocation: 96, imageIndex: 0 },
+          { imageOffset: 9120, imageIndex: 0 }, { imageOffset: 230224, symbol: '-[NSApplication run]', symbolLocation: 480, imageIndex: 1 }, { imageOffset: 24916, symbol: 'start', symbolLocation: 2840, imageIndex: 2 }] },
+        { id: 90012, frames: [{ imageOffset: 3984, symbol: 'mach_msg2_trap', symbolLocation: 8, imageIndex: 3 }] }],
+        usedImages: [{ name: 'Microsoft Excel', path: xlPath, arch: 'arm64', CFBundleShortVersionString: '16.114', CFBundleIdentifier: 'com.microsoft.Excel' }, { name: 'AppKit', path: '/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit', arch: 'arm64e' },
+          { name: 'dyld', path: '/usr/lib/dyld', arch: 'arm64e' }, { name: 'libsystem_kernel.dylib', path: '/usr/lib/system/libsystem_kernel.dylib', arch: 'arm64e' }] }, null, 2) + '\n');
+    add('reports/crash_summary.txt', `# Diagnostic report summary\n\n## reports/Library_Logs_DiagnosticReports/JetsamEvent-2026-03-10-103230.ips\nReport type: bug type 298\nDate/Time: ${local(crash - 150e3, 0)}.00 -0400\nOS Version: macOS 15.7.8 (24G824)\nLargest process: Microsoft Excel\n\n` +
+      `## reports/user_Library_Logs_DiagnosticReports/Microsoft Excel-2026-03-10-103500.ips\nReport type: bug type 309\nProcess: Microsoft Excel\nVersion: 16.114 (16.114.26030814)\nDate/Time: ${local(crash, 0)}.00 -0400\nOS Version: macOS 15.7.8 (24G824)\n` +
+      'Exception Type: EXC_BAD_ACCESS (SIGSEGV)\nException Subtype: KERN_INVALID_ADDRESS at 0x0000000000000018\nTermination: Segmentation fault: 11\nCrashed Thread: 0\n');
 
     const procs = [['Microsoft Excel', 4307, 688, 141], ['WindowServer', 388, 512, 96], ['Browser Helper (Renderer)', 2110, 474, 310], ['Chat Helper (Renderer)', 1532, 431, 288], ['Mail', 911, 302, 120],
       ['Browser', 2101, 260, 88], ['Finder', 640, 148, 61], ['OneDrive', 1145, 96, 58], ['Dock', 633, 71, 30], ['Spotlight', 702, 64, 22], ['Notes', 1290, 58, 19], ['Terminal', 3320, 44, 8]];
     const snapAt = base + span + 220e3;
-    add('system/system_info.txt', '=== Hardware ===\nHardware:\n\n    Hardware Overview:\n\n      Model Name: MacBook Pro\n      Chip: Apple M1 Pro\n      Total Number of Cores: 10\n      Memory: 16 GB\n');
+    add('system/system_info.txt', '=== Collected ===\nTue Mar 10 12:03:33 EDT 2026\nTue Mar 10 16:03:33 UTC 2026\nMode: collect  Days: 1  Ran as: root  Console user: sample\n\n=== macOS ===\nProductName:\t\tmacOS\nProductVersion:\t\t15.7.8\nBuildVersion:\t\t24G824\n\n' +
+      '=== Hardware ===\nHardware:\n\n    Hardware Overview:\n\n      Model Name: MacBook Pro\n      Model Identifier: MacBookPro18,1\n      Chip: Apple M1 Pro\n      Total Number of Cores: 10 (8 performance and 2 efficiency)\n      Memory: 16 GB\n' +
+      '=== Uptime / load ===\n12:03  up 6 days,  2:41, 2 users, load averages: 2.31 2.87 3.40\n\n=== Disk ===\nFilesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on\n' +
+      '/dev/disk3s1s1   460Gi    10Gi    41Gi    21%    453k  427M    0%   /\n/dev/disk3s5     460Gi   402Gi    41Gi    91%    2.1M  427M    0%   /System/Volumes/Data\n');
+    add('office/versions.txt', 'Microsoft Excel: 16.114 (16.114.26030814)\nMicrosoft Word: 16.114 (16.114.26030814)\nOneDrive: 26.035 (26035.0221)\n\n=== Excel processes ===\n4307 /Applications/Microsoft Excel.app/Contents/MacOS/Microsoft Excel\n');
+    add('bundle_info.tsv', 'collector_version\t1.5.0\nmode\tcollect\ncollected_local\t2026-03-10 12:03:40 EDT\ncollected_utc\t2026-03-10 16:03:40\nmacos_version\t15.7.8\nmacos_build\t24G824\nmodel_name\tMacBook Pro\nmodel_identifier\tMacBookPro18,1\n' +
+      'chip\tApple M1 Pro\nmemory\t16 GB\nexcel_version\t16.114\nexcel_build\t16.114.26030814\nlog_format\ttsv\n');
     add('system/memory.txt', `=== ${new Date(snapAt + om * 60000).toUTCString().slice(0, 25)} EDT 2026 / ${stamp(snapAt, 0)} UTC ===\nMemory pressure level (1=normal 2=warning 4=critical): 1\nSwap: total = 2048.00M  used = 1200.00M  free = 848.00M  (encrypted)\n` +
       '--- top processes by memory (MEM = physical footprint, CMPRS = compressed)\nProcesses: 512 total, 3 running, 509 sleeping, 2890 threads \nPhysMem: 11G used (2100M wired, 1500M compressor), 4200M unused.\n\nPID    COMMAND          MEM  CMPRS %CPU #TH \n' +
       procs.map(([n, p, m, c]) => `${String(p).padEnd(6)} ${n.slice(0, 16).padEnd(16)} ${(m + 'M').padEnd(4)} ${(c + 'M').padEnd(5)} ${(rnd() * 9).toFixed(1).padEnd(4)} ${12 + (rnd() * 40 | 0)}  `).join('\n') +
@@ -1127,9 +1523,9 @@ const Core = (() => {
       M.push(`${local(t, 0)},${stamp(t, 0)},${up ? 4121 : 4307},${(rnd() * (up && k > 0.9 ? 99 : 30)).toFixed(1)},${foot},${cmp},${40 + (rnd() * 12 | 0)},${up && k > 0.85 ? 4 : up && k > 0.6 ? 2 : 1},${Math.round(up ? 5200 - 4700 * k : 4200)},${Math.round(up ? 600 + 4200 * k : 1500)},${Math.round(up ? 3900 * k * k : 1200)}`);
     }
     add('excel_memory_timeline.csv', M.join('\n') + '\n');
-    add('manifest.tsv', 'component\tstatus\tdetails\nunified_log_tags\tcomplete\texcel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, permissions, storage, logs-dropped\nsystem\tcomplete\tsystem, memory, sleep/wake, network state\noffice\tcomplete\tversions, Excel logs, AutoRecover, add-ins, preferences\nreports\tcomplete\tcrash, hang, spin and jetsam reports\nunified_logs\tcomplete\t1 day(s), 2026-03-10 through 2026-03-10\n');
+    add('manifest.tsv', 'component\tstatus\tdetails\nunified_log_tags\tcomplete\texcel, excel-helper, microsoft, hang-report, mentions-excel, memory, restart, permissions, storage, logs-dropped\nsystem\tcomplete\tsystem, memory, sleep/wake, network state\noffice\tcomplete\tversions, Excel logs, AutoRecover, add-ins, preferences\nreports\tcomplete\tdiagnostic reports, by the rule in source_catalog.tsv, and the CrashReporter files named Microsoft* or Intervals*\nunified_logs\tcomplete\t1 day(s), 2026-03-10 through 2026-03-10\n');
     add('collection.log', '[12:01:02] Excel diagnostics: collect (2026-03-10 through 2026-03-10) for user sample\n[12:01:02] System information\n[12:01:09] Unified logs (Excel, hangs/terminations, memory pressure), 2026-03-10 through 2026-03-10\n[12:03:40] Done.\n');
-    add('summary.md', `# Excel diagnostics summary\n\nThis is made-up sample data that ships with the viewer. It tells one story: Excel's memory climbs for an hour and a half, a PivotTable filter pushes it over the limit, and Excel crashes at ${local(crash, 0)} local time and is relaunched.\n\n- Collected: 2026-03-10 12:03:40 EDT\n- Console user: sample\n- Mode: collect\n- Incident window: 2026-03-10 through 2026-03-10 (1 day(s))\n\n## Collection status\n\n| Component | Status | Details |\n| --- | --- | --- |\n| system | complete | system, memory, sleep/wake, network state |\n| office | complete | versions, Excel logs, AutoRecover, add-ins, preferences |\n| reports | complete | crash, hang, spin and jetsam reports |\n| unified_logs | complete | 1 day(s) |\n\n## Things to try\n\n1. Search for \`pivot\`, then press \`e\` to step through the errors.\n2. Drag across the spike in the histogram to zoom in on the crash.\n3. Open the Memory tab and click just before the drop.\n`);
+    add('summary.md', `# Excel diagnostics summary\n\nThis is made-up sample data that ships with the viewer. In it, Excel's memory climbs for an hour and a half, a PivotTable filter is asked for, Excel crashes at ${local(crash, 0)} local time, and it is started again.\n\n- Collected: 2026-03-10 12:03:40 EDT\n- Collector version: 1.5.0\n- Console user: sample\n- Mode: collect\n- Incident window: 2026-03-10 through 2026-03-10 (1 day(s))\n\n## Collection status\n\n| Component | Status | Details |\n| --- | --- | --- |\n| system | complete | system, memory, sleep/wake, network state |\n| office | complete | versions, Excel logs, AutoRecover, add-ins, preferences |\n| reports | complete | crash, hang, spin and jetsam reports |\n| unified_logs | complete | 1 day(s) |\n\n## Things to try\n\n1. Search for \`pivot\`, then press \`e\` to step through the errors.\n2. Drag across the spike in the histogram to zoom in on the crash.\n3. Open the Memory tab and click just before the drop.\n`);
     return files;
   }
 
@@ -1151,6 +1547,9 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
     fileBlob: ({ i }) => ds.entries[i].blob(),
     fileChunk: ({ i, offset, len }) => ds.fileChunk(i, offset, len),
     tagTimes: ({ tag, bins }) => ds.tagTimes(tag, bins),
+    facts: () => ds.facts(),
+    marks: () => ds.marks(),
+    report: ({ path }) => ds.report(path),
   };
   self.onmessage = async (ev) => {
     const { id, op, args } = ev.data;

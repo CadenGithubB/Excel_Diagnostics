@@ -44,7 +44,7 @@
       </div>
     </div>
     <ul class="facts">
-      <li><b>Nothing is uploaded.</b> The page has no server side, and its security policy blocks every network request, so it could not send the logs anywhere. You can save this page and use it offline.</li>
+      <li><b>Nothing is uploaded.</b> The page has no server side and makes no requests, and its security policy blocks connections, and scripts, images and styles from any other site. You can save this page and use it offline.</li>
       <li><b>One timeline.</b> The macOS unified log, Excel's own diagnostics, AutoUpdate, OneDrive, install history, sleep and wake, and each crash or hang report are merged by time and shown in the time zone of the Mac they came from.</li>
       <li><b>Large captures are fine.</b> Logs are read from disk as you search instead of being loaded into memory. A bundle over about 1 GB opens fastest from its unzipped folder.</li>
     </ul>
@@ -84,6 +84,7 @@
     <span id="bundleName"></span>
     <nav class="tabs" aria-label="Views">
       <button data-tab="timeline" class="on">Timeline</button>
+      <button data-tab="reports" hidden>Reports</button>
       <button data-tab="files">Files</button>
       <button data-tab="overview">Overview</button>
       <button data-tab="memory" hidden>Memory</button>
@@ -100,12 +101,12 @@
 
   <section id="tab-timeline">
     <aside id="side" aria-label="Filters">
-      <div class="sidehead"><span>Filters</span><button id="clear" title="Remove the search text and every filter (C)" disabled>Clear all</button></div>
+      <div class="sidehead"><span>Filters</span><span class="spacer"></span><button id="clear" title="Remove the search text and every filter (C)" disabled>Clear all</button><button id="sideClose" aria-label="Close the filter list">✕</button></div>
       <div id="facets"></div>
     </aside>
     <div class="tl">
     <div class="toolbar">
-      <button id="facetToggle" title="Show or hide the filter list" aria-label="Show or hide the filter list">☰</button>
+      <button id="facetToggle" title="Show or hide the filter list" aria-label="Show or hide the filter list" aria-controls="side" aria-expanded="true">☰</button>
       <input id="q" type="search" spellcheck="false" autocomplete="off" aria-label="Search" placeholder='Search: words, "a phrase", /regex/, -exclude, process:excel, level:error'>
       <label class="chk"><input type="checkbox" id="caseSens"> Match case</label>
       <button id="help" title="Search syntax and keyboard shortcuts" aria-label="Search help">?</button>
@@ -117,6 +118,7 @@
       <button id="export" title="Download the entries shown as a tab-separated file">Export</button>
       <div id="searchbar" hidden><div></div></div>
     </div>
+    <div id="qnotes" role="status" hidden></div>
     <div id="banner" hidden><span id="bannerText"></span><button id="bannerAll">Show all time</button><span class="spacer"></span><button id="bannerClose" aria-label="Dismiss">✕</button></div>
     <div class="histwrap">
       <div class="histhead">
@@ -131,6 +133,7 @@
         <button id="allTime">All time</button>
       </div>
       <div id="hist"></div>
+      <div id="histKey" class="histkey" hidden></div>
       <div id="histTip" hidden></div>
     </div>
     <div class="main">
@@ -151,6 +154,11 @@
       <div id="tree"></div>
     </div>
     <div id="fileview"><p class="dim">Choose a file. Files marked with a dot are on the timeline.</p></div>
+  </section>
+
+  <section id="tab-reports" hidden>
+    <div class="replist"><p id="repcount" class="dim"></p><div id="replist"></div></div>
+    <div id="repview"></div>
   </section>
 
   <section id="tab-overview" hidden><div class="pad" id="overview"></div></section>

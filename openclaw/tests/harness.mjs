@@ -11,6 +11,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
+import { Buffer } from 'node:buffer';
+import { deflateRawSync } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export { describe, it } from './dsl.mjs';
@@ -56,10 +58,11 @@ export function sampleBundlesDir() {
 /**
  * Run the built command-line tool in request mode. `req` is sent as JSON on stdin; pass { input } to send
  * raw text instead. Resolves { code, stdout, stderr, json } where json is the parsed stdout or null.
+ * The program gets this process's environment, with `env` laid over it.
  */
-export function request(req, { input } = {}) {
+export function request(req, { input, env } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(RUNTIME[0], [...RUNTIME.slice(1), CLI_PATH, 'request'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(RUNTIME[0], [...RUNTIME.slice(1), CLI_PATH, 'request'], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...(env ?? {}) } });
     let stdout = '', stderr = '';
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
@@ -74,16 +77,55 @@ export function request(req, { input } = {}) {
   });
 }
 
-/** Run the text command line: resolves { code, stdout, stderr }. */
-export function cli(args) {
+/**
+ * Run the text command line: resolves { code, stdout, stderr, out, err }, where out and err are the same output as
+ * bytes (a case about control characters has to look at bytes). The program gets this process's environment with
+ * `env` laid over it, and runs in the folder `cwd` when one is given. A run that is still going after `timeoutMs`
+ * is stopped and resolves with code null.
+ */
+export function cli(args, { env, cwd, timeoutMs } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(RUNTIME[0], [...RUNTIME.slice(1), CLI_PATH, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
+    const child = spawn(RUNTIME[0], [...RUNTIME.slice(1), CLI_PATH, ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(env ?? {}) }, ...(cwd ? { cwd } : {}) });
+    const out = [], err = [];
+    const timer = timeoutMs ? setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, timeoutMs) : null;
+    child.stdout.on('data', (d) => { out.push(d); });
+    child.stderr.on('data', (d) => { err.push(d); });
     child.on('error', reject);
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), out: Buffer.concat(out), err: Buffer.concat(err) }); });
   });
+}
+
+const CRC = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) c = CRC[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+/**
+ * A zip file as bytes, written here so that a case can put into one what no zip program would: a name with ".."
+ * in it, a name that is only ".", a name with a NUL. `entries` is [{ name, data, deflate }]: name and data are
+ * strings or Buffers, and a member is stored as it is unless deflate is true. Every member is a plain file.
+ */
+export function zipBytes(entries) {
+  const locals = [], central = [];
+  let at = 0;
+  for (const e of entries) {
+    const name = Buffer.isBuffer(e.name) ? e.name : Buffer.from(e.name, 'utf8'), data = Buffer.isBuffer(e.data) ? e.data : Buffer.from(e.data ?? '', 'utf8'), crc = crc32(data);
+    const packed = e.deflate ? deflateRawSync(data) : data, method = e.deflate ? 8 : 0;
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(method, 8); local.writeUInt32LE(crc, 14); local.writeUInt32LE(packed.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(name.length, 26);
+    const dir = Buffer.alloc(46);
+    dir.writeUInt32LE(0x02014b50, 0); dir.writeUInt16LE(20, 4); dir.writeUInt16LE(20, 6); dir.writeUInt16LE(method, 10); dir.writeUInt32LE(crc, 16); dir.writeUInt32LE(packed.length, 20); dir.writeUInt32LE(data.length, 24); dir.writeUInt16LE(name.length, 28); dir.writeUInt32LE(at, 42);
+    locals.push(local, name, packed); central.push(dir, name);
+    at += 30 + name.length + packed.length;
+  }
+  const cd = Buffer.concat(central), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Math.min(entries.length, 0xFFFF), 8); end.writeUInt16LE(Math.min(entries.length, 0xFFFF), 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(at, 16);
+  return Buffer.concat([...locals, cd, end]);
 }
 
 /**

@@ -90,9 +90,9 @@ describe('request mode: a bundle whose clock changed, and that covers more than 
 
   it('a file that is not text is refused as a binary file, and an empty one is said to be empty', async () => {
     const [bin, odl, empty] = await Promise.all([ask('read_file', { path: 'blob.bin' }), ask('read_file', { path: 'SyncEngine.odl' }), ask('read_file', { path: 'empty.txt' })]);
-    assert.deepEqual(bin, { ok: false, bundle: TWO_ZONES, error: 'binary file', field: 'path', hint: 'blob.bin is not text, so it cannot be read here. Choose another file from excel_diag_files.' });
+    assert.deepEqual(bin, { ok: false, bundle: TWO_ZONES, error: 'binary file', field: 'path', hint: 'The file "blob.bin" is not text, so it cannot be read here. Choose another file from excel_diag_files.' });
     assert.equal(odl.error, 'binary file');
-    assert.equal(odl.hint, "sync/SyncEngine.odl: This is a OneDrive sync log in Microsoft's obfuscated binary format. It cannot be printed as text or searched. Choose another file from excel_diag_files.");
+    assert.equal(odl.hint, 'The file "sync/SyncEngine.odl" is a OneDrive sync log in Microsoft\'s obfuscated binary format. It cannot be printed as text or searched. Choose another file from excel_diag_files.');
     assert.equal(empty.ok, true);
     assert.deepEqual(empty.receipt, { path: 'empty.txt', bytes: 0, lines: 0, truncated: false });
     assert.deepEqual(empty.notes, ['This file is empty.']);
@@ -110,7 +110,7 @@ describe('request mode: a file this account may not read', () => {
       const readable = await fs.readFile(file).then(() => true, () => false);
       if (readable) return;      // an account that can read anything (root) has no such file to meet
       const d = await ask('read_file', { path: 'locked.dat' });
-      assert.deepEqual(d, { ok: false, bundle: TWO_ZONES, error: 'the file cannot be read', field: 'path', hint: 'locked.dat could not be opened on the OpenClaw host (EACCES). Tell the human, or choose another file from excel_diag_files.' });
+      assert.deepEqual(d, { ok: false, bundle: TWO_ZONES, error: 'the file cannot be read', field: 'path', hint: 'The file "locked.dat" could not be opened on the OpenClaw host (EACCES). Tell the human, or choose another file from excel_diag_files.' });
       const others = await ask('read_file', { path: 'old/setup.log' });
       assert.equal(others.ok, true, 'the rest of the bundle is still readable');
     } finally { await fs.chmod(file, 0o644); await fs.rm(file); }
@@ -135,7 +135,7 @@ describe('request mode: a bundle with no log in it', () => {
   it('show and context are refused, and the refusal names the tools that do work', async () => {
     for (const d of await Promise.all([ask('show', { ...p, id: 0 }), ask('context', { ...p, time: '2026-01-01 00:00:00' }), ask('show', p)])) {
       assert.deepEqual(d, { ok: false, bundle: NO_LOGS, error: 'this bundle has no timeline entries',
-        hint: `No file in bundle ${NO_LOGS} is a log with timestamps this tool recognises, so there are no entries to show. ${FILES} lists its files and excel_diag_read_file reads one.` });
+        hint: `No file in bundle "${NO_LOGS}" is a log with timestamps this tool recognises, so there are no entries to show. ${FILES} lists its files and excel_diag_read_file reads one.` });
     }
   });
 

@@ -11,6 +11,7 @@
 const OPS = ['summary', 'search', 'count', 'histogram', 'show', 'context', 'reports', 'files', 'read_file', 'memory'];
 const TAKES_UTC = new Set(['summary', 'search', 'count', 'histogram', 'show', 'context', 'reports', 'memory']);
 const TEXT_MOST = 24000;                                  // characters of text in one answer
+const RECEIPT_MOST = TEXT_MOST;                           // characters of the receipt, as JSON, in one answer
 const ENTRY_BYTES = 64 << 10;                             // of each entry read for a listing; a longer one is read again by itself
 const MORE = '\u2026';                                  // an ellipsis: it ends anything that was cut short
 
@@ -29,7 +30,47 @@ const said = () => lines.splice(0);                       // what the shared pri
 // A model leaves an argument out in more than one way: by omitting it, with null, or with an empty string.
 const absent = (v) => v === undefined || v === null || (typeof v === 'string' && !v.trim());
 const kindOf = (v) => (Array.isArray(v) ? 'A list' : typeof v === 'object' ? 'An object' : typeof v === 'string' ? 'A string' : typeof v === 'boolean' ? 'true or false' : 'A number');
-const quoted = (s) => JSON.stringify(s.length > 60 ? `${s.slice(0, 60)}${MORE}` : s);     // an argument said back, never at length
+// An argument or a name said back, never at length, with every character in it that would act, break the line, turn
+// the text round or take no room written by its number (hidden(), in the text commands).
+const shownAll = shownBy(hidden);
+const quoted = (s, most = 60) => shownAll(JSON.stringify(s.length > most ? `${s.slice(0, most)}${MORE}` : s));
+// Whoever made a bundle chose every name in it: its tags, its process and level names, the paths of its files, and
+// (as the name of the zip or folder) its id. A sentence written here is one the model acts on, so a name from the
+// bundle is never part of its wording. Where one has to be said, fromBundle() says it as data: on one line, cut
+// short, in quotation marks, and not as the first words of the sentence. Where a result suggests a call, a name or
+// a path goes into it only when it is short and plain (plainName, plainPath); a suggestion that would need any
+// other is left out. No key of a result is a name from the bundle: where names are counted, each name is a value in
+// a list ({tag, entries}), as it is in a count, and only this tool's own words are keys.
+const fromBundle = (s) => quoted(String(s), 200);
+const plainName = (s) => typeof s === 'string' && /^[\w .()\[\]-]{1,60}$/.test(s);
+const plainPath = (s) => typeof s === 'string' && s.length <= 200 && s.split('/').every(plainName);      // each folder and the file name, a plain name
+// Nothing from a bundle is passed on at any length. A name, a path or a list in a result can be as long as whoever
+// wrote the bundle likes; each is cut here, whatever part of the result it sits in. The receipt as a whole has one
+// budget as well, the size one answer's text may be: when it is over, its lists and then its strings are cut
+// further, step by step, until it fits, and a note says what the cut was.
+const STRING_MOST = 1200, LIST_MOST = 200, NOTE_MOST = 2000, NEXT_MOST = 4000;
+const clipped = (s, most) => (s.length > most ? `${s.slice(0, most)}${MORE}` : s);
+function bounded(v, lists, strings, was) {
+  if (typeof v === 'string') return clipped(v, strings);
+  if (Array.isArray(v)) { if (v.length > lists) was.cut = true; return v.slice(0, lists).map((x) => bounded(x, lists, strings, was)); }
+  if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v)) o[clipped(k, strings)] = bounded(v[k], lists, strings, was); return o; }
+  return v;
+}
+const BUDGET_STEPS = [[LIST_MOST, STRING_MOST], [100, STRING_MOST], [50, STRING_MOST], [25, 600], [12, 300], [6, 150], [3, 80], [1, 40], [0, 20]];
+function withinBudget(receipt) {
+  let out, was, step = 0;
+  for (;; step++) {
+    was = { cut: false };
+    out = bounded(receipt, BUDGET_STEPS[step][0], BUDGET_STEPS[step][1], was);
+    // measured as it will be written (asJson), each character that is written as its escape counted at that length
+    if (asJson(out).length <= RECEIPT_MOST || step === BUDGET_STEPS.length - 1) break;
+  }
+  const [lists, strings] = BUDGET_STEPS[step];
+  if (step) note(`This result was larger than one answer holds, so it was cut to fit: no list in it has more than ${count(lists, 'item')}, and no name, path or other text in it more than ${strings} characters.`);
+  else if (was.cut) note(`A list in this result was cut to its first ${LIST_MOST} items.`);
+  if (step || was.cut) out.truncated = true;
+  return out;
+}
 
 // The example in a refusal is the value that was sent, as a string, whenever that is what was meant; an invented
 // example is one more thing a model can copy in place of a real value.
@@ -62,7 +103,15 @@ function whole(name, least, most, usual) {
 
 // ---------- saying things ----------
 const tool = (op) => `excel_diag_${op}`;
-const braces = (o) => `{${Object.entries(o).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(', ')}}`;
+// A value in a suggested call, as JSON. A value can come from the bundle (the bundle id does, whole, when the call
+// named a bundle), and JSON leaves some characters as they are that break a line, turn text round or take no room
+// (see hidden() in the text commands). Each of those is written as its escape instead (a character past U+FFFF as
+// the two escapes of its UTF-16 pair): the value still decodes to exactly what it was, so the call still reaches
+// what it names, and it is said on one line, the right way round, with nothing in it unseen. The plugin writes the
+// facts of a result the same way, and the receipt is measured written so (withinBudget).
+const escapes = (c) => c.split('').map((u) => `\\u${u.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+const asJson = (v) => { let out = ''; for (const c of JSON.stringify(v)) out += hidden(c.codePointAt(0)) ? escapes(c) : c; return out; };
+const braces = (o) => `{${Object.entries(o).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${asJson(v)}`).join(', ')}}`;
 // A call the model could make next, written the way it would send it. It stays on the bundle and the clock of this
 // call: without that, a follow-up to a call that named an older bundle would quietly go to the newest one.
 const call = (op, a = {}) => `${tool(op)} ${braces({ ...a, ...(utc && TAKES_UTC.has(op) ? { utc: true } : {}), ...(R.named ? { bundle: R.id } : {}) })}`;
@@ -96,10 +145,41 @@ function fit(head, items, fromStart) {
   return kept;
 }
 
+// The first line of a listing always stays, cut short if it has to be (and the heading with it, should that be
+// what is long). A listing with no line in it would give a nextOffset equal to the offset that was sent, and a
+// caller that follows it would ask for the same page again.
+const HEAD_MOST = TEXT_MOST / 4;
+function fitFirst(head, items) {
+  const kept = fit(head, items);
+  if (kept || !items.length) return kept;
+  for (let i = 0; i < head.length; i++) head[i] = clipped(head[i], HEAD_MOST);
+  items[0] = clipped(items[0], Math.max(0, TEXT_MOST - head.reduce((a, l) => a + l.length + 1, 0) - 1));
+  note('The first line listed is longer than one result holds, so it was cut short.');
+  return 1;
+}
+
+// One files call lists one page: the first `limit` (60 unless sent) of the files whose path contains its filter, and
+// of those only as many lines as one result holds. A sentence that offers such a call to list some files says "a
+// page at a time" when they would not all be on its first page.
+const FILES_PAGE = 60, FILES_HEAD = `${'SIZE'.padStart(10)}  ${'TIMELINE_ENTRIES'.padStart(16)}  PATH`;
+const fileRow = (x) => `${fmtBytes(x.size).padStart(10)}  ${(onTimeline(x) ? String(x.rows) : '-').padStart(16)}  ${named(x.path)}`;
+const filesFor = (filter) => info.files.filter((x) => !filter || x.path.toLowerCase().includes(filter.toLowerCase()));
+const onOnePage = (hits) => hits.length <= FILES_PAGE && fit([FILES_HEAD], hits.map(fileRow)) >= hits.length;
+const PAGED = 'a page at a time: send nextOffset as offset for the next page';
+
+// A refusal that gives candidates gives as many of the first `most` as fit, with the rest of the refusal, in what
+// the facts of one result may hold, measured as they are handed over (asJson, as withinBudget measures a receipt).
+// hintFor(n) is the hint for n candidates, which says how many are given.
+function withCandidates(error, field, all, most, hintFor) {
+  let n = Math.min(most, all.length);
+  while (n > 1 && asJson({ error, field, hint: hintFor(n), candidates: all.slice(0, n) }).length > RECEIPT_MOST) n--;
+  return new Refusal(error, field, hintFor(n), { candidates: all.slice(0, n) });
+}
+
 // ---------- refusals ----------
 const noEntry = (field, id) => new Refusal('no such entry', field, `No entry has id ${id}. Entry ids in this bundle run from 0 to ${info.total - 1}. Copy an id from the ID column of ${tool('search')} or ${tool('context')}; do not guess one.`);
 function needTimeline() {
-  if (!info.total) throw new Refusal('this bundle has no timeline entries', undefined, `No file in bundle ${R.id} is a log with timestamps this tool recognises, so there are no entries to show. ${call('files')} lists its files and ${tool('read_file')} reads one.`);
+  if (!info.total) throw new Refusal('this bundle has no timeline entries', undefined, `No file in bundle ${fromBundle(R.id)} is a log with timestamps this tool recognises, so there are no entries to show. ${call('files')} lists its files and ${tool('read_file')} reads one.`);
 }
 // The shell's refusals, worded again for a model. The option a refusal names becomes the argument that was sent.
 function reworded(err) {
@@ -136,14 +216,18 @@ function bundlesIn(dir) {
   for (const name of names) {
     if (name.startsWith('.')) continue;
     let st;
-    try { st = fs.statSync(path.join(dir, name)); } catch (err) { continue; }      // a dangling link
+    // A link in the bundles folder is not a bundle: it could lead anywhere on this machine (unzipping a hostile zip
+    // with another tool can leave one there)
+    try { st = fs.lstatSync(path.join(dir, name)); } catch (err) { continue; }
+    if (st.isSymbolicLink()) continue;
+
     const zip = st.isFile() && /\.zip$/i.test(name), id = zip ? name.replace(/\.zip$/i, '') : name, had = found.get(id);
     if ((!zip && !st.isDirectory()) || !id) continue;
     if (!had || (had.zip && !zip)) found.set(id, { id, file: path.join(dir, name), zip, mtime: st.mtimeMs });      // a folder is used before a zip of the same id: there is nothing to unpack
   }
   return [...found.values()].sort((a, b) => b.mtime - a.mtime || (a.id < b.id ? 1 : -1));
 }
-const idsSaid = (ids) => `${ids.slice(0, 10).join(', ')}${ids.length > 10 ? `, and ${ids.length - 10} more` : ''}`;
+const idsSaid = (ids) => `${ids.slice(0, 10).map(fromBundle).join(', ')}${ids.length > 10 ? `, and ${ids.length - 10} more` : ''}`;
 function pickBundle(list, want) {
   if (!list.length) {
     throw new Refusal('no bundles are available', undefined, 'Ask the human to copy an Excel_Diagnostics_....zip file, or the unzipped folder, into the Excel diagnostics bundles folder on the OpenClaw host. Do not call these tools again until the human says that is done.');
@@ -152,7 +236,7 @@ function pickBundle(list, want) {
   const low = want.toLowerCase(), same = list.filter((b) => b.id === want), alike = same.length ? same : list.filter((b) => b.id.toLowerCase() === low);
   if (alike.length === 1) return alike[0];
   const hits = alike.length ? alike : list.filter((b) => b.id.toLowerCase().includes(low));
-  if (hits.length === 1) { note(`bundle ${quoted(want)} was read as ${hits[0].id}.`); return hits[0]; }
+  if (hits.length === 1) { note(`bundle ${quoted(want)} was read as ${fromBundle(hits[0].id)}.`); return hits[0]; }
   if (hits.length) throw new Refusal('bundle matches more than one bundle', 'bundle', `${quoted(want)} is part of ${hits.length} bundle ids. Send one of the candidates, whole, as bundle.`, { candidates: hits.slice(0, 10).map((b) => b.id) });
   throw new Refusal('no such bundle', 'bundle', `No bundle id is or contains ${quoted(want)}. The bundles here, newest first: ${idsSaid(list.map((b) => b.id))}. Send one of these ids as bundle, or leave bundle out for the newest; do not guess an id.`);
 }
@@ -160,12 +244,20 @@ async function openBundle(b, others) {
   const instead = others.length ? `Other bundles here: ${idsSaid(others)}. Send one of them as bundle.` : 'Ask the human to copy the bundle into the Excel diagnostics bundles folder again.';
   try { await open(b.file, true); } catch (err) {
     const why = err instanceof Usage && err.why ? err.why.why : '';
-    if (why === 'empty-bundle' || /^No files found/.test(String(err && err.message))) throw new Refusal('the bundle is empty', 'bundle', `Bundle ${b.id} holds no files. ${instead}`);
-    if (why === 'no-bundle') throw new Refusal('the bundle is no longer there', 'bundle', `Bundle ${b.id} was removed while it was being opened. ${instead}`);
-    process.stderr.write(`${err && err.stack ? err.stack : err}\n`);
+    const id = fromBundle(b.id);
+    if (why === 'empty-bundle' || /^No files found/.test(String(err && err.message))) throw new Refusal('the bundle is empty', 'bundle', `Bundle ${id} holds no files. ${instead}`);
+    if (why === 'no-bundle') throw new Refusal('the bundle is no longer there', 'bundle', `Bundle ${id} was removed while it was being opened. ${instead}`);
+    // The zip unpacks to more than is unpacked here. Copying it in again would change nothing, and each call would
+    // unpack up to the limit again before failing. A folder is read in place, with nothing to unpack.
+    if (why === 'too-large') {
+      throw new Refusal('the bundle is too large to unpack', 'bundle', `Bundle ${id} is a zip file that unpacks to more than ${err.why.limit} or more than 200,000 files and folders, so it was not unpacked. Tell the human that, and that the zip can be unzipped into the Excel diagnostics bundles folder, where a folder is read in place. ${others.length ? `Other bundles here: ${idsSaid(others)}. Send one of them as bundle.` : 'Do not call these tools again until the human says that is done.'}`);
+    }
+    toErr(`${err && err.stack ? err.stack : err}\n`);
     // What went wrong is passed on as it was reported. Why it went wrong is not guessed at: the human can look.
-    const said = err && typeof err.code === 'string' ? `Bundle ${b.id} could not be read on the OpenClaw host (${err.code}). Tell the human that, with the code.`
-      : `Bundle ${b.id} could not be read${b.zip ? ' as a zip file' : ''}: ${scrub(String((err && err.message) || err)).replace(/[.!?]*$/, '.')} Tell the human that.`;
+    const said = err && typeof err.code === 'string' ? `Bundle ${id} could not be read on the OpenClaw host (${err.code}). Tell the human that, with the code.`
+      // A fixed sentence: the reader's own message can quote a name from inside the zip, written by whoever made
+      // the zip, and this sentence is one the model acts on. The message itself went to standard error above.
+      : `Bundle ${id} could not be read${b.zip ? ' as a zip file' : ''}. Tell the human that.`;
     throw new Refusal('the bundle could not be opened', 'bundle', `${said} ${instead}`);
   }
 }
@@ -184,7 +276,14 @@ function sweepCache(dir) {
     try {
       const full = path.join(dir, name), st = fs.lstatSync(full);
       if (!st.isDirectory()) continue;
-      if (/\.part-\d+$/.test(name)) { if (Date.now() - st.mtimeMs > PART_KEPT_MS) fs.rmSync(full, { recursive: true, force: true }); continue; }
+      const part = /\.part-(\d+)$/.exec(name);
+      if (part) {                                       // left by a run that is over (it was stopped while unpacking), or old
+        let running = true;
+        try { process.kill(+part[1], 0); } catch (err) { running = err.code === 'EPERM'; }
+        if (!running || Date.now() - st.mtimeMs > PART_KEPT_MS) fs.rmSync(full, { recursive: true, force: true });
+        continue;
+      }
+
       const zip = fs.readFileSync(path.join(full, '.unpacked'), 'utf8').trim();      // no marker: not made here, so it stays
       let zst = null;
       try { zst = fs.statSync(zip); } catch (err) { if (err.code !== 'ENOENT') continue; }
@@ -214,7 +313,12 @@ function filters() {
 async function matched(f) {
   if (!info.total) return { r: { count: 0 }, receipt: { query: f.query, matched: 0, total: 0 } };      // nothing to search, and nothing to check a time or an id against
   const { q, said: read } = await buildQuery(f.o, f.query), r = await ds.query(q, () => {});
-  for (const n of notesFor(r, !r.count)) note(`${n.text}${countable(n) ? ` ${call('count', { by: n.field })} lists every ${n.field}.` : ''}`);
+  // A note about a field value that names nothing lists, for the page, the names the bundle does have. Here the
+  // note is the engine's sentence without that list (plain), and the call that lists the names takes its place.
+  for (const n of notesFor(r, !r.count)) {
+    const names = n.plain !== undefined ? n.names : countable(n) ? n.field : null;
+    note(`${n.plain !== undefined ? n.plain : n.text}${names ? ` ${call('count', { by: names })} lists every ${names}.` : ''}${names === 'source' ? ` source: also matches the path of a log file; ${call('count', { by: 'file' })} lists those.` : ''}`);
+  }
   const receipt = { query: q.text };
   if (q.t0 != null) receipt.from = fmtTime(q.t0, false);
   if (q.t1 != null) receipt.to = fmtTime(q.t1, false);
@@ -257,6 +361,9 @@ async function listed(positions, maxChars) {
   return rows;
 }
 
+// A word that the name of every memory file of a kind holds, to filter the list of files by.
+const MEMORY_FILTER = { timeline: 'excel_memory_timeline', snapshot: 'memory', excelMemory: 'excel_', jetsamReport: 'JetsamEvent' };
+
 // ---------- the operations ----------
 const OP = {
   async summary() {
@@ -273,13 +380,13 @@ const OP = {
       receipt.period = { from: fmtTime(info.t0, false), to: fmtTime(info.t1, false) };
       if (info.focus) receipt.mainPeriod = { from: fmtTime(info.focus[0], false), to: fmtTime(info.focus[1], false) };
       receipt.timeZone = zone();
-      receipt.bySeverity = Object.fromEntries(counted('sev'));
-      receipt.byTag = Object.fromEntries(counted('tag'));
+      receipt.bySeverity = Object.fromEntries(counted('sev'));      // the tool's own six names
+      receipt.byTag = counted('tag').map(([tag, entries]) => ({ tag, entries }));      // the tags are the bundle's names: values, not keys
       receipt.topProcesses = counted('proc').slice(0, 8).map(([name, entries]) => ({ process: name, entries }));
       receipt.processes = r.facets.proc.all;
-      const more = saySources('', String);
-      out.push(...said());
-      if (more) { receipt.truncated = true; note(`${out.length - 1 + more} log sources are on the timeline and ${out.length - 1} of them are listed. ${call('count', { by: 'file' })} lists the sources with the most entries.`); }
+      const more = saySources('', String), table = said(), fits = fit(table.slice(0, 1), table.slice(1)), left = table.length - 1 - fits + more;
+      out.push(...table.slice(0, 1 + fits));
+      if (left) { receipt.truncated = true; note(`${fits + left} log sources are on the timeline and ${fits} of them are listed. ${call('count', { by: 'file' })} lists the sources with the most entries.`); }
       if (info.focus) out.push(`Note: The macOS and Excel logs cover ${receipt.mainPeriod.from} to ${receipt.mainPeriod.to} (mainPeriod). Entries outside that come from other sources, such as install history, sleep and wake records and reports.`);
       const errors = r.facets.sev.values.reduce((a, [v, c]) => a + (v >= 4 ? c : 0), 0);
       if (errors) steps.push([call('search', { minSeverity: 'error' }), `lists the ${count(errors, 'error or fault', 'errors and faults')}`]);
@@ -305,7 +412,7 @@ const OP = {
     if (start >= r.count) throw new Refusal('offset is past the last match', 'offset', `${r.count === 1 ? 'Only 1 entry matches' : `Only ${r.count} entries match`}, so offset can be from 0 to ${r.count - 1}. Leave offset out to start from the first match.`);
     const rows = await listed(Array.from(ds.view.subarray(start, start + limit)), maxChars);
     printRows(rows, { wide: true });
-    const out = said(), kept = fit(out.slice(0, 1), out.slice(1)), last = start + kept;
+    const out = said(), head = out.slice(0, 1), listing = out.slice(1), kept = fitFirst(head, listing), last = start + kept;
     if (kept < rows.length) note(`These entries are long: ${kept} of the ${rows.length} asked for fit in one result. nextOffset continues after them.`);
     receipt.shown = { first: start + 1, last };
     receipt.truncated = last < r.count || (newest && start > 0);
@@ -317,7 +424,7 @@ const OP = {
     // Paging through hundreds of matches gets a small model nowhere; counting them by process is the way in.
     if (onward && r.count > 5 * limit) steps.push(onward, [call('count', { ...f.same, by: 'process' }), `counts all ${r.count} matches by process`]);
     else { steps.push([call('show', { id }), 'gives that entry in full']); if (onward) steps.push(onward); }
-    return { receipt, text: out.slice(0, 1 + kept).join('\n'), next: nextSaid(steps) };
+    return { receipt, text: [...head, ...listing.slice(0, kept)].join('\n'), next: nextSaid(steps) };
   },
 
   async count() {
@@ -343,7 +450,12 @@ const OP = {
     }
     if (top && top.value !== '(none)') {
       const { query, ...rest } = f.same;
-      steps.push([call('search', { query: [query, termFor(field || 'process', top.value)].filter(Boolean).join(' '), ...rest }), `lists the entries behind the largest ${field || 'process'} value, ${top.value}`]);
+      // A name from the bundle goes into a suggested call only when it is short and plain. Any other is text its
+      // writer chose. Even a plain one is said once, in the call, and not again in the words beside it: a short
+      // sentence of letters, spaces and dots is a plain name too.
+      // The search finds every name that holds this one (MATCHES, in the text commands), and the words say that.
+      const by = field || 'process';
+      if (plainName(top.value)) steps.push([call('search', { query: [query, termFor(by, top.value)].filter(Boolean).join(' '), ...rest }), `lists the entries counted here ${MATCHES[BY_FIELD[by]]} the largest ${by} value`]);
     }
     if (field && receipt.moreValues > 0 && limit < 60) {
       const all = receipt.values.length + receipt.moreValues;      // offered as the size to ask for when one call can list them all
@@ -419,7 +531,7 @@ const OP = {
       else note(`This message has ${msg.length} characters. The first ${maxChars} are shown, and one call returns no more than that.`);
     }
     steps.push([call('context', { id }), 'shows what every source logged around it']);
-    if (receipt.reportFile) steps.push([call('read_file', { path: receipt.reportFile }), 'reads the report file itself']);
+    if (plainPath(receipt.reportFile)) steps.push([call('read_file', { path: receipt.reportFile }), 'reads the report file itself']);
     return { receipt, text: clip(msg, maxChars), next: nextSaid(steps) };
   },
 
@@ -453,17 +565,19 @@ const OP = {
     let lo = 1, hi = out.length, size = out.reduce((n, l) => n + l.length + 1, -1);
     while (size > TEXT_MOST && hi - lo > 1) { if (anchor - a - (lo - 1) >= (hi - 2) - (anchor - a)) size -= out[lo++].length + 1; else size -= out[--hi].length + 1; }
     if (hi - lo < asked) { cut = true; note(`These entries are long: ${hi - lo} of the ${asked} around the anchor fit in one result. A smaller maxChars fits more of them.`); }
+    if (size > TEXT_MOST) { out[0] = clipped(out[0], HEAD_MOST); out[lo] = clipped(out[lo], Math.max(0, TEXT_MOST - out[0].length - 2)); cut = true; note('The line of the anchor entry is longer than one result holds, so it was cut short.'); }
     b = a + hi - 1; a += lo - 1;
     if (id === undefined) note(at[1] >= s.t ? `The anchor is entry ${anchor}, the first entry at or after ${fmtTime(s.t, false)}.` : `No entry ${window !== undefined ? 'in the window ' : ''}is at or after ${fmtTime(s.t, false)}, so the anchor is the entry nearest before it, ${anchor}.`);
     Object.assign(receipt, { anchorId: anchor, anchorTime: fmtTime(at[1], false), shown: { firstId: a, lastId: b - 1 }, entries: b - a, truncated: cut, timeZone: zone() });
     const steps = [[call('show', { id: anchor }), 'gives the anchor entry in full']], proc = info.names.proc[at[4]];
     if (window === undefined && (before < 40 || after < 40)) steps.push([call('context', { id: anchor, before: Math.min(40, Math.max(16, before * 2)), after: Math.min(40, Math.max(16, after * 2)) }), 'shows more either side']);
-    steps.push(proc ? [call('search', { query: termFor('process', proc), aroundId: anchor, window: '1m' }), `lists only what ${proc} logged within a minute either side`]
+    steps.push(proc && plainName(proc) ? [call('search', { query: termFor('process', proc), aroundId: anchor, window: '1m' }), "lists what every process whose name contains the anchor entry's process name logged within a minute either side"]
       : [call('search', { aroundId: anchor, window: '1m', minSeverity: 'warning' }), 'lists only warnings and worse within a minute either side']);
     return { receipt, text: [out[0], ...out.slice(lo, hi)].join('\n'), next: nextSaid(steps) };
   },
 
   async reports() {
+    // byKind: the kinds are this tool's own words for the reports (Crash, Hang, Jetsam and so on), not names from the bundle
     const all = info.reports.slice().sort((a, b) => a.t - b.t), newest = all.slice(-80), receipt = { reports: all.length, byKind: Object.fromEntries(reportKinds()) };
     if (!all.length) {
       note('This bundle holds no crash, hang, spin, jetsam or other diagnostic report files.');
@@ -472,16 +586,18 @@ const OP = {
     }
     sayReports(newest);
     const out = said(), kept = fit(out.slice(0, 1), out.slice(1), true), x = newest[newest.length - 1];
-    if (kept < all.length) note(`This bundle holds ${all.length} report files and the ${kept} newest are listed. Each report is also a timeline entry: ${call('search', { query: 'source:"crash and hang reports"' })} lists them all, oldest first.`);
+    // That search lists a page of 20 unless sent a limit, so past 20 the sentence says it lists a page at a time.
+    const everyReport = 'source:"crash and hang reports"', paged = kept < all.length && (await ds.query({ text: everyReport, bins: 1, dry: true }, () => {})).count > 20;
+    if (kept < all.length) note(`This bundle holds ${all.length} report files and the ${kept} newest are listed. Each report is also a timeline entry: ${call('search', { query: everyReport })} lists them all, oldest first${paged ? `, ${PAGED}` : ''}.`);
     Object.assign(receipt, { shown: kept, truncated: kept < all.length, timeZone: zone() });
-    const steps = [[call('read_file', { path: x.path }), 'reads the newest report']];
+    const steps = plainPath(x.path) ? [[call('read_file', { path: x.path }), 'reads the newest report']] : [];
     if (info.total) steps.push([call('context', { time: fmtTime(x.t, false), window: '1m' }), 'shows what every source logged in the minute before and after it']);
     return { receipt, text: [out[0], ...out.slice(out.length - kept)].join('\n'), next: nextSaid(steps) };
   },
 
   async files() {
-    const filter = text('filter'), limit = whole('limit', 1, 80, 60), offset = whole('offset', 0, undefined, 0);
-    const hits = info.files.filter((x) => !filter || x.path.toLowerCase().includes(filter.toLowerCase())), receipt = {};
+    const filter = text('filter'), limit = whole('limit', 1, 80, FILES_PAGE), offset = whole('offset', 0, undefined, 0);
+    const hits = filesFor(filter), receipt = {};
     if (filter) receipt.filter = filter;
     receipt.files = hits.length;
     if (filter) receipt.filesInBundle = info.files.length;
@@ -492,12 +608,12 @@ const OP = {
       return { receipt, next: nextSaid([[call('files'), `lists all ${count(info.files.length, 'file')} in this bundle`]]) };
     }
     if (offset >= hits.length) throw new Refusal('offset is past the last file', 'offset', `${hits.length === 1 ? 'Only 1 file is' : `Only ${hits.length} files are`} listed${filter ? ' for this filter' : ''}, so offset can be from 0 to ${hits.length - 1}. Leave offset out to start from the first.`);
-    const page = hits.slice(offset, offset + limit), head = `${'SIZE'.padStart(10)}  ${'TIMELINE_ENTRIES'.padStart(16)}  PATH`;
-    const rows = page.map((x) => `${fmtBytes(x.size).padStart(10)}  ${(onTimeline(x) ? String(x.rows) : '-').padStart(16)}  ${x.path}`), kept = fit([head], rows), last = offset + kept;
+    const page = hits.slice(offset, offset + limit), head = FILES_HEAD;
+    const rows = page.map(fileRow), kept = fitFirst([head], rows), last = offset + kept;
     if (kept < page.length) note(`These paths are long: ${kept} of the ${page.length} asked for fit in one result. nextOffset continues after them.`);
     Object.assign(receipt, { shown: { first: offset + 1, last }, truncated: last < hits.length });
     if (last < hits.length) receipt.nextOffset = last;
-    const steps = [[call('read_file', { path: page[0].path }), 'reads the first file listed']];
+    const steps = plainPath(page[0].path) ? [[call('read_file', { path: page[0].path }), 'reads the first file listed']] : [];
     if (last < hits.length) steps.push([call('files', { filter, ...(absent(P.limit) ? {} : { limit }), offset: last }), 'lists the files after these']);
     return { receipt, text: [head, ...rows.slice(0, kept)].join('\n'), next: nextSaid(steps) };
   },
@@ -508,14 +624,19 @@ const OP = {
     const hits = findFiles(typed), f = hits[0];
     if (!hits.length) throw new Refusal('no such file in this bundle', 'path', `No file in this bundle has ${quoted(typed)} as its path, as its name or as part of its path. Copy a path from the PATH column of ${tool('files')}; do not guess one.`);
     if (hits.length > 1) {
-      throw new Refusal('path matches more than one file', 'path', `${quoted(typed)} is part of ${hits.length} paths. Send one of the candidates, whole, as path.${hits.length > 20 ? ` The first 20 are given; ${call('files', { filter: typed })} lists them all.` : ''}`, { candidates: hits.slice(0, 20).map((x) => x.path) });
+      // The files call is offered with the text findFiles looked for (what was sent, without a leading "./" or "/"):
+      // its filter finds the same paths, all of them, by the same rule.
+      const filter = typed.replace(/^\.?\//, ''), paged = onOnePage(filesFor(filter)) ? '' : `, ${PAGED}`;
+      throw withCandidates('path matches more than one file', 'path', hits.map((x) => x.path), 20, (n) => `${quoted(typed)} is part of ${hits.length} paths. Send one of the candidates, whole, as path.${n < hits.length ? ` The first ${n} are given; ${call('files', { filter })} lists them all${paged}.` : ''}`);
     }
-    if (f.path !== typed) note(`path ${quoted(typed)} was read as ${f.path}.`);
+    if (f.path !== typed) note(`path ${quoted(typed)} was read as ${fromBundle(f.path)}.`);
     // A bundle copied by hand can hold a file this account may not read. That is the file's fault, not the program's.
-    const got = await fileLines(f).catch((err) => { throw (err && typeof err.code === 'string' ? new Refusal('the file cannot be read', 'path', `${f.path} could not be opened on the OpenClaw host (${err.code}). Tell the human, or choose another file from ${tool('files')}.`) : err); });
-    const receipt = { path: f.path, bytes: got.size }, steps = [], source = [call('search', { query: termFor('file', f.path) }), "lists this file's entries on the timeline, by time"];
+    const got = await fileLines(f).catch((err) => { throw (err && typeof err.code === 'string' ? new Refusal('the file cannot be read', 'path', `The file ${fromBundle(f.path)} could not be opened on the OpenClaw host (${err.code}). Tell the human, or choose another file from ${tool('files')}.`) : err); });
+    // The path a suggested call gives this file by: its own when that is short and plain, else the one that was
+    // sent when that is. With neither, the calls that read on are left out; nextFromLine is in the receipt all the same.
+    const receipt = { path: f.path, bytes: got.size }, steps = [], again = [f.path, typed].find(plainPath);
     if (got.binary) {
-      throw new Refusal('binary file', 'path', `${ODL.test(f.path) ? `${f.path}: ${ODL_SAID}` : `${f.path} is not text, so it cannot be read here.`} Choose another file from ${tool('files')}.`);
+      throw new Refusal('binary file', 'path', `The file ${fromBundle(f.path)} ${ODL.test(f.path) ? ODL_SAID.replace(/^This /, '') : 'is not text, so it cannot be read here.'} Choose another file from ${tool('files')}.`);
     }
     const all = got.all || [], total = all.length;
     receipt.lines = total;
@@ -525,7 +646,7 @@ const OP = {
       return { receipt };
     }
     if (got.cut) note(`Only the first ${fmtBytes(READ_CAP)} of this file was read. lines counts that part, and nothing after it can be read here.`);
-    if (fromLine > total) throw new Refusal('fromLine is past the last line', 'fromLine', `${f.path} has ${count(total, 'line')}, so fromLine can be from 1 to ${total}. Leave fromLine out to start from the first line.`);
+    if (fromLine > total) throw new Refusal('fromLine is past the last line', 'fromLine', `The file has ${count(total, 'line')}, so fromLine can be from 1 to ${total}. Leave fromLine out to start from the first line.`);
     const picked = [];
     let matchedLines = 0, onward = 0;
     if (grep === undefined) for (let i = fromLine - 1; i < Math.min(total, fromLine - 1 + limit); i++) picked.push(i);
@@ -545,14 +666,14 @@ const OP = {
       receipt.truncated = grep === undefined ? toLine < total : kept < onward;
       if (receipt.truncated) {
         receipt.nextFromLine = toLine + 1;
-        steps.push([call('read_file', { path: f.path, fromLine: toLine + 1, ...(absent(P.limit) ? {} : { limit }), grep }), grep === undefined ? 'reads the lines after these' : 'lists the matching lines after these']);
+        if (again) steps.push([call('read_file', { path: again, fromLine: toLine + 1, ...(absent(P.limit) ? {} : { limit }), grep }), grep === undefined ? 'reads the lines after these' : 'lists the matching lines after these']);
       }
-      if (grep !== undefined) steps.push([call('read_file', { path: f.path, fromLine: Math.max(1, picked[0] + 1 - 10), limit: 21 }), `reads the lines around line ${picked[0] + 1}, the first match listed`]);
+      if (grep !== undefined && again) steps.push([call('read_file', { path: again, fromLine: Math.max(1, picked[0] + 1 - 10), limit: 21 }), `reads the lines around line ${picked[0] + 1}, the first match listed`]);
     } else {
       receipt.truncated = false;
       note(matchedLines ? `No line from line ${fromLine} on contains ${quoted(grep)}; ${count(matchedLines, 'earlier line does', 'earlier lines do')}.` : `No line of this file contains ${quoted(grep)}. Capitals are ignored.`);
     }
-    if (onTimeline(f)) { receipt.timelineEntries = f.rows; steps.push(source); }
+    if (onTimeline(f)) { receipt.timelineEntries = f.rows; if (plainPath(f.path)) steps.push([call('search', { query: termFor('file', f.path) }), `lists by time the entries ${MATCHES.source} this file's path`]); }
     if (grep !== undefined) Object.assign(receipt, { grep, matchedLines });
     return { receipt, text: rows.slice(0, kept).join('\n'), next: nextSaid(steps) };
   },
@@ -564,9 +685,20 @@ const OP = {
       for (const f of g.files.slice(0, 12)) receipt.files.push({ kind: g.kind, path: f.path, bytes: f.size });
       unlisted += Math.max(0, g.files.length - 12);
     }
-    if (unlisted) {
-      Object.assign(receipt, { filesNotListed: unlisted, truncated: true });
-      note(`${count(unlisted, 'more memory file is', 'more memory files are')} in this bundle than files lists. ${call('files', { filter: groups.find((g) => g.files.length > 12).files[0].path.replace(/[^/]*$/, '') || 'JetsamEvent' })} lists them.`);
+    if (unlisted) Object.assign(receipt, { filesNotListed: unlisted, truncated: true });
+    // For each kind with files left out: how many, and a filter for the files call that every one of them matches
+    // (by that call's own rule: the path contains it, capitals ignored). Of the filters that do, the one that
+    // matches the fewest files of the bundle is offered: their folder or their file name, when all of them share it
+    // and it is short and plain, or a word every file of that kind has in its name. When it matches other files
+    // too, the sentence says so, and when they are more than its first page lists, that it lists a page at a time.
+    for (const g of groups.filter((x) => x.files.length > 12)) {
+      const left = g.files.slice(12), dirs = new Set(left.map((f) => f.path.replace(/[^/]*$/, ''))), bases = new Set(left.map((f) => baseOf(f.path)));
+      const [dir] = dirs, [base] = bases;
+      const offered = [dirs.size === 1 && dir && plainPath(dir.replace(/\/$/, '')) ? dir : null, bases.size === 1 && plainName(base) ? base : null, MEMORY_FILTER[g.kind]]
+        .filter((filter) => filter && left.every((f) => f.path.toLowerCase().includes(filter.toLowerCase())))
+        .map((filter) => ({ filter, hits: filesFor(filter) })).sort((a, b) => a.hits.length - b.hits.length)[0];
+      const said = `${count(left.length, `more memory file of kind ${g.kind} is`, `more memory files of kind ${g.kind} are`)} in this bundle than files lists.`;
+      note(offered ? `${said} ${call('files', { filter: offered.filter })} lists ${offered.hits.length === left.length ? 'them' : 'them among others'}${onOnePage(offered.hits) ? '' : `, ${PAGED}`}.` : said);
     }
     const csv = (groups.find((g) => g.kind === 'timeline') || { files: [] }).files[0];
     if (csv) {
@@ -581,10 +713,12 @@ const OP = {
       if (k < 0) note("The memory timeline has no utc_time column, so its times are the Mac's local time as written in the file.");
       else if (m.data.length) receipt.timeZone = zone();
     }
-    receipt.memoryEntries = info.total ? (await ds.query({ text: 'tag:memory', bins: 1 }, () => {})).count : 0;
+    // The entries that carry the memory tag itself, as the page counts them. The search offered for them finds every
+    // tag that holds "memory", so it can list more, and the words beside it say that.
+    receipt.memoryEntries = info.total ? ds.tagTimes('memory', 1).total : 0;
     if (!receipt.files.length && !receipt.memoryEntries) note('This bundle holds no memory files and no log entries tagged memory.');
-    if (receipt.files.length) steps.push([call('read_file', { path: receipt.files[0].path }), 'reads the first of those files']);
-    if (receipt.memoryEntries) steps.push([call('search', { query: 'tag:memory' }), `lists the ${count(receipt.memoryEntries, 'entry', 'entries')} tagged memory`]);
+    if (receipt.files.length && plainPath(receipt.files[0].path)) steps.push([call('read_file', { path: receipt.files[0].path }), 'reads the first of those files']);
+    if (receipt.memoryEntries) steps.push([call('search', { query: 'tag:memory' }), `lists the entries ${MATCHES.tag} memory`]);
     return { receipt, next: nextSaid(steps) };
   },
 };
@@ -637,9 +771,9 @@ async function answer(raw) {
     await openBundle(b, R.ids.filter((x) => x !== b.id));
     R.id = b.id;
   }
-  const out = await OP[req.op](), doc = { ok: true, bundle: R.id, notes: R.notes, receipt: out.receipt };
+  const out = await OP[req.op](), receipt = withinBudget(out.receipt), doc = { ok: true, bundle: R.id, notes: R.notes.map((n) => clipped(n, NOTE_MOST)), receipt };
   if (out.text) doc.text = out.text;
-  if (out.next) doc.next = out.next;
+  if (out.next) doc.next = clipped(out.next, NEXT_MOST);
   return doc;
 }
 // Whatever happens, one JSON document is printed. A refusal is an ordinary answer and the exit status stays 0; the
@@ -653,9 +787,10 @@ function failed(thrown) {
     return doc;
   }
   process.exitCode = 1;
-  process.stderr.write(`${err && err.stack ? err.stack : err}\n`);
+  toErr(`${err && err.stack ? err.stack : err}\n`);
   doc.error = 'the Excel diagnostics program failed';
-  doc.hint = `Tell the human that ${R.op ? tool(R.op) : 'the Excel diagnostics program'} failed with: ${scrub(String((err && err.message) || err)).slice(0, 300).replace(/[.!?]*$/, '.')} Do not send the same call again.`;
+  // one line, whatever the message quotes
+  doc.hint = `Tell the human that ${R.op ? tool(R.op) : 'the Excel diagnostics program'} failed with: ${shownAll(named(scrub(String((err && err.message) || err)))).slice(0, 300).replace(/[.!?]*$/, '.')} Do not send the same call again.`;
   return doc;
 }
 async function answerRequest() {

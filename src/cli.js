@@ -11,13 +11,72 @@ import process from 'node:process';
 import zlib from 'node:zlib';
 import { Duplex } from 'node:stream';
 
-const VERSION = '1.0';
+const VERSION = '1.1';
 const SEV = Core.SEV;
 const VIEWER_URL = 'https://cadengithubb.github.io/Excel_Diagnostics/';
 
 try { new DecompressionStream('deflate-raw'); } catch (e) {       // older Node: inflate zip members with zlib instead
   globalThis.DecompressionStream = class { constructor() { return Duplex.toWeb(zlib.createInflateRaw()); } };
 }
+
+// ---------- what reaches the terminal ----------
+// What is printed holds text from the bundle, written by whoever made it. A control character in it is shown,
+// never sent: sent, it would be the terminal's to act on (move the cursor, retitle the window, write to the
+// clipboard, hide or reorder what follows). Tabs and line ends stay. Everything this tool writes to a terminal
+// goes through shown(): the lines gathered for the end of a command, and what is written at once to standard
+// error while a bundle is opened (toErr), where the name of a zip is the name its sender gave it.
+const odd = (n) => n < 9 || (n > 10 && n < 32) || (n >= 127 && n <= 159) || n === 0x2028 || n === 0x2029 || (n >= 0x202a && n <= 0x202e) || (n >= 0x2066 && n <= 0x2069);
+// Characters that take no room where they stand: every character Unicode calls default-ignorable (the soft hyphen,
+// the combining grapheme joiner, the Arabic letter mark, the Hangul fillers, the Khmer inherent vowels, the Mongolian
+// variation selectors and vowel separator, the zero-width space, non-joiner and joiner, the direction marks, the word
+// joiner, the invisible operators and the other format characters beside them, the variation selectors, the byte
+// order mark, the shorthand and musical format controls, the tag characters, and the code points kept for more of
+// these), and the interlinear annotation marks. The tag characters, and the variation selectors one to a byte, can
+// spell out a whole sentence. A person reading sees nothing where one is; a program reading the text gets it whole.
+const unseen = (n) => n === 0xad || n === 0x34f || n === 0x61c || n === 0x115f || n === 0x1160 || n === 0x17b4 || n === 0x17b5 || (n >= 0x180b && n <= 0x180f)
+  || (n >= 0x200b && n <= 0x200f) || (n >= 0x2060 && n <= 0x206f) || n === 0x3164 || (n >= 0xfe00 && n <= 0xfe0f) || n === 0xfeff || n === 0xffa0
+  || (n >= 0xfff0 && n <= 0xfffb) || (n >= 0x1bca0 && n <= 0x1bca3) || (n >= 0x1d173 && n <= 0x1d17a) || (n >= 0xe0000 && n <= 0xe0fff);
+// Both: what is written by its number where a name or an id is said to a model, in a suggested call or in quotation marks.
+const hidden = (n) => odd(n) || unseen(n);
+const shownBy = (test) => (s) => {
+  let out = '';
+  for (const c of String(s)) {
+    const n = c.codePointAt(0);
+    out += !test(n) ? c : n < 32 ? `^${String.fromCharCode(n + 64)}` : n === 127 ? '^?' : `<U+${n.toString(16).toUpperCase().padStart(4, '0')}>`;
+  }
+  return out;
+};
+const shown = shownBy(odd);
+const toErr = (s) => process.stderr.write(shown(s));
+// A name taken from the bundle (its own name, a file, a folder, a process, a level, a tag) is one line wherever this
+// tool says it in a line of its own: a line break in it is written as \n and a tab as \t. Left as they are, they
+// would start lines of the name's own, laid out like this tool's ("Next:" and a command under it). A character that
+// takes no room is written by its number, so that what is printed is all the name holds. Two of them stay where
+// they are part of an emoji, and only there: the variation selector right after a pictograph, which says how to draw
+// it, and the zero-width joiner between two pictographs (the first perhaps with that selector or a skin tone after
+// it), which joins them into one picture. Anywhere else each is written by its number like the rest.
+const BREAKS = new RegExp(`\\r\\n?|[\\n\\v\\f${String.fromCodePoint(0x85, 0x2028, 0x2029)}]`, 'g');
+const PICTURE = /\p{Extended_Pictographic}/u;
+const pictured = (c) => c !== undefined && PICTURE.test(c);
+const toned = (c) => c !== undefined && (c.codePointAt(0) === 0xfe0f || (c.codePointAt(0) >= 0x1f3fb && c.codePointAt(0) <= 0x1f3ff));
+function roomless(s) {
+  const cs = [...String(s)];
+  return cs.map((c, i) => {
+    const n = c.codePointAt(0);
+    if (!unseen(n)) return c;
+    const emoji = n === 0x200d ? pictured(cs[i + 1]) && (pictured(cs[i - 1]) || (toned(cs[i - 1]) && pictured(cs[i - 2])))
+      : (n === 0xfe0e || n === 0xfe0f) && pictured(cs[i - 1]);
+    return emoji ? c : `<U+${n.toString(16).toUpperCase().padStart(4, '0')}>`;
+  }).join('');
+}
+const named = (s) => roomless(String(s).replace(BREAKS, '\\n').replace(/\t/g, '\\t'));
+// A command this tool suggests has to hold a name exactly, or it would not find the thing named. So a name goes
+// into one only when it is printed exactly as it is: one line, with nothing in it that has to be shown another way.
+// A suggestion that would need any other name is left out. A path given as an argument must also not read as an option.
+const plainHere = (s) => typeof s === 'string' && s.length > 0 && s.length <= 300 && named(s) === s && shown(s) === s;
+const plainArg = (s) => plainHere(s) && !s.startsWith('-');
+// A column value no wider than `most`, ending in ~ when it was cut (never through the middle of a character).
+const cutAt = (s, most) => (s.length <= most ? s : `${s.slice(0, s.charCodeAt(most - 2) >= 0xD800 && s.charCodeAt(most - 2) <= 0xDBFF ? most - 2 : most - 1)}~`);
 
 // ---------- small helpers ----------
 const fmtN = (n) => Number(n).toLocaleString('en-US');
@@ -26,6 +85,10 @@ const z2 = (n, w = 2) => String(n).padStart(w, '0');
 const plural = (n, one, many = one + 's') => `${fmtN(n)} ${n === 1 ? one : many}`;
 const lines = [];
 const say = (s = '') => lines.push(s);
+// A line printed as it stands in the bundle. It is remembered as the bundle's, so that nothing later takes it for one
+// of this tool's own lines (a file can hold a line that reads "Next:").
+const theirs = new Set();
+const sayTheirs = (s = '') => { theirs.add(lines.length); lines.push(s); };
 // The command was not understood: exit status 2. The message is written for a person at a shell. `why` holds the
 // same refusal as data, so request mode can word it for a model, which is shown argument names and not options.
 class Usage extends Error {
@@ -33,7 +96,8 @@ class Usage extends Error {
 }
 
 const RUNTIME = typeof Deno !== 'undefined' ? 'deno run -A' : 'node';
-const shq = (s) => (/^[A-Za-z0-9_\/.:=@%+,-]+$/.test(s) ? s : `'${String(s).replace(/'/g, `'\\''`)}'`);
+// A word that starts with "=" is quoted too: zsh, the shell a Mac starts with, reads =ls as the path of the ls command.
+const shq = (s) => (/^[A-Za-z0-9_\/.:@%+,-][A-Za-z0-9_\/.:=@%+,-]*$/.test(s) ? s : `'${String(s).replace(/'/g, `'\\''`)}'`);
 const SCRIPT = (() => {
   const p = process.argv[1] || 'excel_diagnostics_cli.mjs', rel = path.relative(process.cwd(), p);
   return rel && !rel.startsWith('..') && rel.length < p.length ? rel : p;
@@ -86,13 +150,21 @@ class DiskBlob {
     } });
   }
 }
+// The files of a bundle folder. A link inside it is never followed: a bundle comes from someone else, and a link in
+// it could point at any file on this machine, which would then be listed, searched and printed as if it were a log.
+// Only plain files and folders are taken. linksLeftOut says how many links were passed over in the last walk.
+let linksLeftOut = 0;
+const readRoots = [];                                     // every folder the open bundle's files are read from; "export" writes into none of them
 function walk(root, top, loose) {
   const inputs = [];
+  linksLeftOut = 0;
+  readRoots.push(root);
   const go = (dir, rel) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, e.name);
       let st;
-      try { st = fs.statSync(full); } catch (err) { continue; }      // a dangling link
+      try { st = fs.lstatSync(full); } catch (err) { continue; }
+      if (st.isSymbolicLink()) { linksLeftOut++; continue; }
       if (st.isDirectory()) go(full, `${rel}${e.name}/`);
       else if (st.isFile() && e.name !== '.unpacked') inputs.push({ path: `${top}${rel}${e.name}`, blob: new DiskBlob(full, 0, st.size), loose });
     }
@@ -107,11 +179,21 @@ let cacheRoot = null;                                     // request mode unpack
 const cacheDir = () => cacheRoot || path.join(os.tmpdir(), 'excel_diagnostics_cli');
 // The folder a zip is unpacked into is named after the zip's size and date, so a zip that is replaced gets a new one.
 const unpackedName = (zipPath, st) => `${path.basename(zipPath).replace(/\.zip$/i, '')}-${st.size}-${Math.floor(st.mtimeMs)}`;
-async function unpack(zipPath) {
+// A few kilobytes of zip can unpack to any size. A bundle's text packs perhaps twenty to one, so past two hundred
+// to one (and never under a gigabyte, never over the ceiling) this is not a bundle and unpacking stops. The budget
+// is one for everything a run unpacks: a zip found inside the zip is unpacked out of what the first one left.
+// made: the folders this run unpacked and moved into place. chain: those and the ones it found already unpacked by an
+// earlier run, every folder the chain of zips is read from, so that a refusal further down can take them all away again.
+function unpackBudget(zipPath, size) {
+  const gb = Number(process.env.EXCEL_DIAG_UNPACK_LIMIT_GB);
+  return { name: path.basename(zipPath), most: gb > 0 ? gb * 2 ** 30 : Math.min(64 * 2 ** 30, Math.max(2 ** 30, size * 200)), written: 0, files: 0, made: [], chain: [] };
+}
+async function unpack(zipPath, budget) {
   const st = fs.statSync(zipPath);
   const dir = path.join(cacheDir(), unpackedName(zipPath, st)), marker = path.join(dir, '.unpacked');
-  if (fs.existsSync(marker)) return dir;
-  process.stderr.write(`Unpacking ${path.basename(zipPath)} (${fmtBytes(st.size)}) into ${dir} ...\n`);
+  if (fs.existsSync(marker)) { if (budget) budget.chain.push(dir); return dir; }
+  budget = budget || unpackBudget(zipPath, st.size);
+  toErr(`Unpacking ${named(path.basename(zipPath))} (${fmtBytes(st.size)}) into ${named(dir)} ...\n`);
   // Unpacked beside its final place and moved there whole, so that another process opening the same zip at the
   // same moment (a program may make two requests at once) never reads a half-written folder.
   const part = `${dir}.part-${process.pid}`;
@@ -119,14 +201,29 @@ async function unpack(zipPath) {
   fs.mkdirSync(part, { recursive: true, mode: 0o700 });
   const file = new DiskBlob(zipPath, 0, st.size);
   try {
-    for (const e of await Core.readZip(file)) {
+    const inside = path.resolve(part) + path.sep;
+    const tooMuch = () => new Usage(`${named(budget.name)} unpacks to more than ${fmtBytes(budget.most)} or more than 200,000 files and folders, which is far more than a bundle of its size holds, so it was not unpacked.\nIf it really is a bundle, set EXCEL_DIAG_UNPACK_LIMIT_GB to a larger number of gigabytes and run this again.`, { why: 'too-large', limit: fmtBytes(budget.most) });
+    let members;
+    try { members = await Core.readZip(file, 200001 - budget.files); } catch (err) { if (err && err.tooMany) throw tooMuch(); throw err; }
+    for (const e of members) {
+      if (++budget.files > 200000) throw tooMuch();
+
       const parts = e.path.split('/').filter(Boolean);
-      if (!parts.length || parts.includes('..') || /(^|\/)(__MACOSX\/|\.DS_Store$|\._[^/]*$)/.test(e.path)) continue;
+      if (!parts.length || parts.includes('..') || CLUTTER.test(e.path)) continue;
+      // A name must stay a name inside the folder being unpacked into. Where a backslash separates folders
+      // (Windows), a name that holds one, or a drive letter, could step outside; a NUL ends a name early anywhere.
+      if (e.path.includes('\0') || (path.sep === '\\' && parts.some((p) => p.includes('\\') || /^[A-Za-z]:/.test(p)))) continue;
       const dest = path.join(part, ...parts);
+      if (!path.resolve(dest).startsWith(inside)) continue;
+
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       const fd = fs.openSync(dest, 'w');
       try {
-        for await (const c of new Core.Entry(e.path, e.size, null, { file, e }).chunks(false)) for (let n = 0; n < c.length;) n += fs.writeSync(fd, c, n, c.length - n);
+        for await (const c of new Core.Entry(e.path, e.size, null, { file, e }).chunks(false)) {
+          if ((budget.written += c.length) > budget.most) throw tooMuch();      // counted as it is written: the sizes a zip declares can lie
+          for (let n = 0; n < c.length;) n += fs.writeSync(fd, c, n, c.length - n);
+        }
+
       } finally { fs.closeSync(fd); }
     }
     fs.writeFileSync(path.join(part, '.unpacked'), `${path.resolve(zipPath)}\n`);
@@ -135,29 +232,71 @@ async function unpack(zipPath) {
       fs.rmSync(dir, { recursive: true, force: true });    // what is in the way was left half-done by an earlier run
       fs.renameSync(part, dir);
     }
+    budget.made.push(dir);
   } catch (err) {
     if (!fs.existsSync(marker)) throw err;
   } finally { fs.rmSync(part, { recursive: true, force: true }); }
-  process.stderr.write(cacheRoot ? 'Unpacked.\n' : `Unpacked. Later commands on this zip reuse that folder; "${RUNTIME} ${shq(SCRIPT)} clean" deletes it.\n`);
+  budget.chain.push(dir);
+  toErr('Unpacked.\n');                                    // that later commands reuse it is said once the whole chain is in
   return dir;
+}
+// The zip that is the whole of what was found: the one zip there, with nothing beside it but its checksum (and what
+// macOS strews about). This is what the engine would take for the bundle and inflate itself, in memory.
+const CLUTTER = /(^|\/)(__MACOSX\/|\.DS_Store$|\._[^/]*$|\.localized$|Icon\r$)/;    // what macOS and the Finder leave; the engine sets aside the same
+const baseOf = (p) => p.slice(p.lastIndexOf('/') + 1);
+function loneZip(inputs) {
+  const given = inputs.filter((f) => !CLUTTER.test(f.path)), zips = given.filter((f) => /\.zip$/i.test(f.path));
+  if (zips.length !== 1) return null;
+  const beside = `${baseOf(zips[0].path)}.sha256`.toLowerCase();
+  return given.every((f) => f === zips[0] || baseOf(f.path).toLowerCase() === beside) ? zips[0] : null;
 }
 
 // ---------- the open bundle ----------
 let ds = null, info = null, utc = false;
 // loose: a zip found among the files of the folder or zip being opened is one of the bundle's files. Request mode
-// asks for that, because the bundle it opens was chosen by name. Without it the engine takes such a zip to be the
-// bundle, which is right when a person points this tool or the page at a zip and its checksum together.
+// asks for that, because the bundle it opens was chosen by name. Without it a zip that is all there is, alone or
+// with its checksum, is taken to be the bundle, which is right when a person points this tool at the folder a
+// zip and its checksum were delivered in.
 async function open(arg, loose) {
   let inputs;
+  readRoots.length = 0;
   if (arg === 'sample') inputs = Core.sampleBundle(1);
   else {
-    let st;
+    let st, budget = null, depth = 0;
     try { st = fs.statSync(arg); } catch (err) {
       throw new Usage(`There is no file or folder at ${arg}.\nGive the path to an Excel_Diagnostics_....zip, to the unzipped folder, or to a log file. The word "sample" in its place opens built-in made-up data.`, { why: 'no-bundle' });
     }
-    if (st.isDirectory()) inputs = walk(arg, `${path.basename(path.resolve(arg))}/`, loose);
-    else if (/\.zip$/i.test(arg)) inputs = walk(await unpack(arg), '', loose);
+    const unpacked = async (zipPath) => {
+      depth++;
+      budget = budget || unpackBudget(zipPath, fs.statSync(zipPath).size);
+      return walk(await unpack(zipPath, budget), '', loose);
+    };
+    if (st.isDirectory()) {
+      inputs = walk(arg, `${path.basename(path.resolve(arg))}/`, loose);
+      if (linksLeftOut && !loose) toErr(`${linksLeftOut} link${linksLeftOut === 1 ? '' : 's'} in this folder ${linksLeftOut === 1 ? 'was' : 'were'} not followed: a bundle's files are only the ones inside it.\n`);
+    }
+    else if (/\.zip$/i.test(arg)) inputs = await unpacked(arg);
+
     else inputs = [{ path: path.basename(arg), blob: new DiskBlob(arg, 0, st.size) }];
+    if (!loose) {
+      // A zip that is all there is (a zip inside the zip, or a folder holding the zip and its checksum, which is
+      // how the collector delivers one) is the bundle. It is unpacked here like the first, out of the same
+      // budget, and never handed to the engine, which would inflate it in memory with nothing counting the bytes.
+      // Four zips deep is the most; whatever zip is left after that is one of the bundle's files, listed and not opened.
+      // A zip in the chain that is over the limit is refused in the name of the first, as not unpacked: so every
+      // folder of the chain is taken away again, the ones this run unpacked and the ones an earlier run left (a
+      // folder found unpacked is not counted against the limit), and the next run starts from nothing.
+      try {
+        for (let zip; depth < 4 && (zip = loneZip(inputs));) inputs = await unpacked(zip.blob.path);
+      } catch (err) {
+        if (budget && err instanceof Usage && err.why && err.why.why === 'too-large') for (const dir of budget.chain) fs.rmSync(dir, { recursive: true, force: true });
+        throw err;
+      }
+      if (budget && budget.made.length && !cacheRoot) toErr(`Later commands on this ${st.isDirectory() ? 'folder' : 'zip'} reuse what was unpacked; "${RUNTIME} ${shq(SCRIPT)} clean" deletes it.\n`);
+      const given = inputs.filter((f) => !CLUTTER.test(f.path));
+      if (given.length > 1 && given.every((f) => /\.zip$/i.test(f.path))) throw new Error('Open one bundle at a time (several .zip files were given).');
+      for (const f of inputs) if (/\.zip$/i.test(f.path)) f.loose = true;
+    }
     if (!inputs.length) throw new Usage(`${arg} is an empty folder.`, { why: 'empty-bundle' });
   }
   ds = new Core.Dataset();
@@ -166,7 +305,7 @@ async function open(arg, loose) {
   info = await ds.load(inputs, (p) => {
     if (!tty) return;
     const s = `${p.phase}${p.total ? ` ${Math.round((p.done / p.total) * 100)}%` : ''}`;
-    if (s !== last) { last = s; process.stderr.write(`\r${s.padEnd(40)}`); }
+    if (s !== last) { last = s; process.stderr.write(`\r${shown(s.padEnd(40))}`); }
   });
   if (tty && last) process.stderr.write(`\r${''.padEnd(40)}\r`);
 }
@@ -292,7 +431,11 @@ const optionsSaid = (o, drop = []) => Object.entries(o).filter(([k]) => !drop.in
 const again = (command, o, pos, drop, extra) => run([command, ...pos.map(shq), optionsSaid(o, drop), extra].filter(Boolean).join(' '));
 
 // ---------- printing entries ----------
-const flat = (s) => String(s).replace(/\r?\n/g, '\\n').replace(/\t/g, ' ');
+const flat = (s) => String(s).replace(BREAKS, '\\n').replace(/\t/g, ' ');
+// One entry is one line. The level, the source and the process are names from the bundle: each is said on one line
+// and cut to a width (LEVEL 24, SOURCE 34, PROCESS[PID] 34, ending in ~ when cut), because every line of the table
+// is padded to the widest of them and one long name would make every line that long.
+const LEVEL_WIDE = 24, SOURCE_WIDE = 34, PROCESS_WIDE = 34;
 function printRows(rows, { wide, mark } = {}) {
   if (!rows.length) return;
   const N = info.names, idW = Math.max(2, String(rows.reduce((a, r) => Math.max(a, r[0]), 0)).length + (mark === undefined ? 0 : 1));
@@ -300,8 +443,8 @@ function printRows(rows, { wide, mark } = {}) {
     let msg = flat(r[9]);
     if (!wide && msg.length > 220) msg = `${msg.slice(0, 220)}... [+${fmtN(msg.length - 220)} characters; --wide or "show ${r[0]}" has the rest]`;
     else if (r[10]) msg += ` ... [cut at 2,048 bytes; "show ${r[0]}" has the rest]`;
-    const proc = (N.proc[r[4]] || '-') + (r[5] ? `[${r[5]}]` : '');
-    return [(r[0] === mark ? '>' : '') + r[0], fmtTime(r[1]), N.lvl[r[3]] || SEV[info.lvlSev[r[3]]], info.sources[r[2]].short, proc.length > 34 ? proc.slice(0, 33) + '~' : proc, msg];
+    const proc = named(N.proc[r[4]] || '-') + (r[5] ? `[${r[5]}]` : '');
+    return [(r[0] === mark ? '>' : '') + r[0], fmtTime(r[1]), cutAt(named(N.lvl[r[3]] || SEV[info.lvlSev[r[3]]]), LEVEL_WIDE), cutAt(named(info.sources[r[2]].short), SOURCE_WIDE), cutAt(proc, PROCESS_WIDE), msg];
   });
   const w = [idW, 23, ...[2, 3, 4].map((k) => cells.reduce((a, c) => Math.max(a, c[k].length), k === 2 ? 5 : 6))];
   say(['ID'.padStart(w[0]), 'TIME'.padEnd(w[1]), 'LEVEL'.padEnd(w[2]), 'SOURCE'.padEnd(w[3]), 'PROCESS[PID]'.padEnd(w[4]), 'MESSAGE'].join('  '));
@@ -310,7 +453,8 @@ function printRows(rows, { wide, mark } = {}) {
 const notesFor = (r, nothing) => (r.notes || []).filter((n) => !n.soft || nothing);     // a soft note is only worth saying when nothing matched
 const countable = (n) => n.field && n.field !== 'level' && n.field !== 'source';        // the note names a field whose values "count" can list
 function sayNotes(r, nothing) {
-  for (const n of notesFor(r, nothing)) say(`Note: ${n.text}${countable(n) ? ` To list every ${n.field}: ${run(`count --by ${n.field}`)}` : ''}`);
+  // such a note can list names from the bundle (its tags, its levels, the names close to the one typed): one line, whatever they hold
+  for (const n of notesFor(r, nothing)) say(`Note: ${named(n.text)}${countable(n) ? ` To list every ${n.field}: ${run(`count --by ${n.field}`)}` : ''}`);
 }
 // Nothing matched: count again with each condition taken away in turn, so the reader can see which one is responsible.
 // Each answer says which condition went (window, sev, cs or term, with the search text that was left) and the count.
@@ -339,9 +483,9 @@ async function sayWhyNothing(q, r, said, o) {
 // ---------- what the commands work out, apart from how they say it (request mode says the same things as data) ----------
 const collectorMode = (name) => (/^Excel_Diagnostics_(collect|hang|repro|watch)_/.exec(name) || [])[1];
 function saySources(indent, num) {                        // one line per log source on the timeline; returns how many it left out
-  const src = info.sources.filter((s) => s.rows), w = src.reduce((a, s) => Math.max(a, s.short.length), 6);
+  const src = info.sources.filter((s) => s.rows), short = (s) => cutAt(named(s.short), SOURCE_WIDE), w = src.reduce((a, s) => Math.max(a, short(s).length), 6);
   say(`${indent}${'ENTRIES'.padStart(9)}  ${'SOURCE'.padEnd(w)}  ${'FIRST'.padEnd(19)}  ${'LAST'.padEnd(19)}  FILE`);
-  for (const s of src.slice(0, 40)) say(`${indent}${num(s.rows).padStart(9)}  ${s.short.padEnd(w)}  ${fmtTime(s.t0, false)}  ${fmtTime(s.t1, false)}  ${s.path}`);
+  for (const s of src.slice(0, 40)) say(`${indent}${num(s.rows).padStart(9)}  ${short(s).padEnd(w)}  ${fmtTime(s.t0, false)}  ${fmtTime(s.t1, false)}  ${named(s.path)}`);
   return Math.max(0, src.length - 40);
 }
 function reportKinds() {                                  // kind -> how many reports of it
@@ -350,15 +494,25 @@ function reportKinds() {                                  // kind -> how many re
   return kinds;
 }
 function sayReports(list) {
-  const kw = list.reduce((a, x) => Math.max(a, x.kind.length), 4), pw = Math.min(30, list.reduce((a, x) => Math.max(a, (x.proc || '-').length), 7));
+  const kind = (x) => named(x.kind), proc = (x) => named(x.proc || '-');
+  const kw = list.reduce((a, x) => Math.max(a, kind(x).length), 4), pw = Math.min(30, list.reduce((a, x) => Math.max(a, proc(x).length), 7));
   say(`${'TIME'.padEnd(19)}  ${'KIND'.padEnd(kw)}  ${'PROCESS'.padEnd(pw)}  FILE`);
-  for (const x of list) say(`${fmtTime(x.t, false)}  ${x.kind.padEnd(kw)}  ${(x.proc || '-').slice(0, pw).padEnd(pw)}  ${x.path}`);
+  for (const x of list) say(`${fmtTime(x.t, false)}  ${kind(x).padEnd(kw)}  ${proc(x).slice(0, pw).padEnd(pw)}  ${named(x.path)}`);
 }
 
 // What entries can be counted by, as the engine names each, and the search field that picks one of its values out.
 const BY = { severity: 'sev', level: 'lvl', source: 'group', tag: 'tag', process: 'proc', subsystem: 'sub', category: 'cat', file: 'file' };
 const BY_FIELD = { severity: 'level', level: 'level', source: 'source', tag: 'tag', process: 'process', subsystem: 'subsystem', category: 'category', file: 'source' };
-const termFor = (by, name) => `${BY_FIELD[by]}:${/\s/.test(name) ? `"${name}"` : name}`;
+// A name as a search term. One with a space, a quotation mark or a backslash goes in quotation marks with those two
+// escaped: without that, a name could close the quotation and add terms of its own (a slow pattern, for one). One
+// that starts with a slash goes in them too, so that it is not read as a regular expression. Every command that
+// suggests a search for a name from the bundle builds the term here.
+const termFor = (by, name) => `${BY_FIELD[by]}:${/[\s"\\]|^\//.test(name) ? `"${name.replace(/["\\]/g, '\\$&')}"` : name}`;
+// What such a term finds, by the engine's own rule: every name that contains the value, capitals ignored (a level:
+// every level whose name or severity starts with it; a source: every log whose path or source name contains it).
+// A search for one name also finds every other name that holds it, so a sentence about the search says so.
+const MATCHES = { tag: 'with a tag that contains', process: 'whose process name contains', subsystem: 'whose subsystem contains', category: 'whose category contains',
+  level: 'whose level or severity starts with', source: 'from every log whose path or source name contains' };
 function largest(r, q, field, n) {                        // the n values of a field with the most matches: [[value id, entries]], and how many values there are
   const f = r.facets[BY[field]];
   const vals = f.values.filter(([v, c]) => c > 0 && (BY[field] !== 'lvl' || !q.levelOk || q.levelOk.has(v)));
@@ -409,7 +563,11 @@ const MEMORY_FILES = [
   ['excelMemory', "Excel's memory at collection time, and its breakdown by kind", /(^|\/)(excel_memory|excel_footprint)\.txt$/],
   ['jetsamReport', 'JetsamEvent reports, which macOS writes when it ends processes to free memory', /(^|\/)JetsamEvent[^/]*\.ips$/i],
 ];
-const memoryFiles = () => MEMORY_FILES.map(([kind, title, rx]) => ({ kind, title, files: info.files.filter((f) => f.size && rx.test(f.path)) })).filter((g) => g.files.length);
+// In a collector's bundle the memory files are the ones at the places the collector writes them, and a JetsamEvent
+// report is one only where the collector copies the system's report folder. A file of the same name in a folder
+// that was copied from the Mac is not one of them: such a folder can hold anything. (The page has the same rule.)
+const OWN_MEMORY = /^(?:system\/memory\.txt|(?:repro\/[^/]+\/)?(?:system_memory|excel_memory|excel_footprint)\.txt|office\/(?:excel_memory|excel_footprint)\.txt|memory_snapshots\.txt|excel_memory_timeline\.csv|reports\/Library_Logs_DiagnosticReports(?:_Retired)?\/JetsamEvent[^/]*\.ips)$/;
+const memoryFiles = () => MEMORY_FILES.map(([kind, title, rx]) => ({ kind, title, files: info.files.filter((f) => f.size && rx.test(f.path) && (!ds.collector || OWN_MEMORY.test(f.path))) })).filter((g) => g.files.length);
 const MEMORY_COLUMNS = [['excel_footprint_mb', ' MB'], ['excel_cpu_pct', '%'], ['excel_threads', ''], ['free_mb', ' MB'], ['swap_used_mb', ' MB']];
 const PRESSURE = { 1: 'normal', 2: 'warning', 4: 'critical' };
 // For each of those columns: the sample (a row of the file) with its lowest value, the one with its highest, and
@@ -426,12 +584,59 @@ async function memoryTimeline(csv) {
   return { data, col, stats, levels: lv < 0 ? [] : [...new Set(data.map((d) => d[lv]).filter(Boolean))], pids: pid < 0 ? null : [...new Set(data.map((d) => d[pid]).filter(Boolean))] };
 }
 
+// ---------- where "export" writes ----------
+// The one file this tool writes for a person is the one "export" is given. A bundle comes from someone else, and so
+// does everything in its folder: a name there can be a link to any file on this machine (unzipping restores links),
+// and writing to it would replace that file with rows of the bundle's choosing. So nothing is written inside a
+// folder the bundle is being read from, by the path as it was typed or by where its folder really is (a link to a
+// folder, or /tmp for /private/tmp, makes the two differ); the file is opened without following a link, wherever
+// it is; and the path said afterwards is the one that was written.
+// Which folder a path is in is decided by what each folder is, not by how its path is spelt: on macOS one folder
+// answers to more than one spelling (capitals are not told apart, nor the ways an accented letter can be written),
+// so two spellings are compared by device and inode. Each folder on the path as typed is compared, and each folder
+// above where the file's folder really is, with each folder the bundle is read from.
+const realOf = (p) => { try { return fs.realpathSync(p); } catch (err) { return path.resolve(p); } };
+const upFrom = (p) => { const out = [p]; for (let d = p; path.dirname(d) !== d;) out.push(d = path.dirname(d)); return out; };
+function inBundle(p) {                                    // the folder the bundle is read from that the path p is in, if any
+  const roots = [];
+  for (const root of readRoots) { try { roots.push([root, fs.statSync(root)]); } catch (err) { /* not there: nothing is written into it */ } }
+  let real = null;
+  try { real = fs.realpathSync(path.dirname(p)); } catch (err) { /* no such folder: nothing is written there */ }
+  for (const d of [...upFrom(p), ...(real ? upFrom(real) : [])]) {
+    let st;
+    try { st = fs.statSync(d); } catch (err) { continue; }
+    const hit = roots.find(([, r]) => r.dev === st.dev && r.ino === st.ino);
+    if (hit) return hit[0];
+  }
+  return undefined;
+}
+function writeOut(out, bytes) {
+  const typed = path.resolve(out), root = inBundle(typed);
+  if (root !== undefined) throw new Usage(`"export" does not write into the bundle folder, and --out ${out} is inside it (${named(path.resolve(root))}). Give --out a path outside that folder.`);
+  const link = () => new Usage(`--out ${out} is a link, and "export" does not write through a link. Give --out another file name.`);
+  let st = null, fd;
+  try { st = fs.lstatSync(typed); } catch (err) { /* not there yet */ }
+  if (st && st.isSymbolicLink()) throw link();
+  try { fd = fs.openSync(typed, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | (fs.constants.O_NOFOLLOW || 0), 0o666); } catch (err) {
+    if (err && (err.code === 'ELOOP' || err.code === 'EMLINK')) throw link();      // it became a link since it was looked at
+    throw err;
+  }
+  try { for (let n = 0; n < bytes.length;) n += fs.writeSync(fd, bytes, n, bytes.length - n); } finally { fs.closeSync(fd); }
+  return realOf(typed);
+}
+// The file name a suggested "export" gives. From a working folder inside the bundle folder that is a path to the
+// folder above the bundle, because a bare name would be refused.
+function outName() {
+  const root = inBundle(path.resolve('matches.tsv'));
+  return root === undefined ? 'matches.tsv' : path.relative(realOf('.'), path.join(path.dirname(realOf(root)), 'matches.tsv'));
+}
+
 // ---------- commands ----------
 const COMMANDS = {
   async summary(o) {
     const r = await ds.query({ bins: 1 }, () => {}), mode = collectorMode(info.name);
     const has = (p) => info.files.some((f) => f.path === p && f.size);
-    say(`Bundle: ${info.name}${mode ? ` (the collector ran in ${mode} mode)` : ''}`);
+    say(`Bundle: ${named(info.name)}${mode ? ` (the collector ran in ${mode} mode)` : ''}`);
     say(`Files: ${fmtN(info.files.length)}, ${fmtBytes(info.files.reduce((a, f) => a + f.size, 0))} in all`);
     if (!info.total) {
       say('Entries on the timeline: none. No file here is a log with timestamps this tool recognises.');
@@ -441,7 +646,7 @@ const COMMANDS = {
     say(`Entries on the timeline: ${fmtN(info.total)}, from ${fmtTime(info.t0, false)} to ${fmtTime(info.t1, false)} (${fmtSpan(info.t1 - info.t0)})`);
     say(`Times are shown in ${zoneSaid()}.`);
     if (info.focus) say(`The macOS and Excel logs cover ${fmtTime(info.focus[0], false)} to ${fmtTime(info.focus[1], false)}; entries outside that come from other sources, such as install history, sleep and wake records and reports.`);
-    const top = (name, n) => r.facets[name].values.filter(([, c]) => c > 0).slice(0, n).map(([v, c]) => `${info.names[name][v] || '(none)'} ${fmtN(c)}`).join(', ');
+    const top = (name, n) => r.facets[name].values.filter(([, c]) => c > 0).slice(0, n).map(([v, c]) => `${named(info.names[name][v] || '(none)')} ${fmtN(c)}`).join(', ');
     say(); say(`By severity: ${top('sev', 6) || 'none'}`);
     if (r.facets.tag.values.some(([, c]) => c > 0)) say(`By tag: ${top('tag', 16)}`);
     say(`Busiest processes: ${top('proc', 8)}${r.facets.proc.all > 8 ? `, and ${fmtN(r.facets.proc.all - 8)} more` : ''}`);
@@ -455,7 +660,8 @@ const COMMANDS = {
     if (errors) say(`  The ${fmtN(errors)} errors and faults:        ${run('search --min-severity error')}`);
     if (info.reports.length) say(`  The reports, with their times:      ${run('reports')}`);
     say(`  When entries were logged:           ${run('histogram')}`);
-    say(`  Entries from Excel itself:          ${run('search tag:excel')}`);
+    // tag:excel finds every tag that holds "excel" (excel-helper and mentions-excel too), so that is what is said
+    say(`  Entries ${MATCHES.tag} excel:   ${run('search tag:excel')}`);
     say(`  Search for words:                   ${run('search WORDS')}`);
     if (has('summary.md')) say(`  The collector's own summary:        ${run('cat summary.md')}`);
     say(`  Every command, with worked examples:   ${run('help')}`);
@@ -489,7 +695,7 @@ const COMMANDS = {
     if (r.count > limit) {
       say(`  Which processes these are from:  ${again('count', o, pos, ['limit', 'offset', 'last', 'wide'], '--by process')}`);
       say(`  When they were logged:           ${again('histogram', o, pos, ['limit', 'offset', 'last', 'wide'])}`);
-      say(`  All ${fmtN(r.count)} to a file:   ${again('export', o, pos, ['limit', 'offset', 'last', 'wide'], '--out matches.tsv')}`);
+      say(`  All ${fmtN(r.count)} to a file:   ${again('export', o, pos, ['limit', 'offset', 'last', 'wide'], `--out ${shq(outName())}`)}`);
     }
   },
 
@@ -508,7 +714,7 @@ const COMMANDS = {
     const table = (field, n) => {
       const { vals, all } = largest(r, q, field, n);
       say(); say(`By ${field}${field === 'severity' ? ' (what this tool counts each level as)' : field === 'level' ? " (the logs' own level names)" : field === 'tag' ? ' (an entry can carry several)' : ''}:`);
-      for (const [v, c] of vals) say(`  ${fmtN(c).padStart(11)}  ${((c / r.count) * 100).toFixed(1).padStart(5)}%  ${info.names[BY[field]][v] || '(none)'}`);
+      for (const [v, c] of vals) say(`  ${fmtN(c).padStart(11)}  ${((c / r.count) * 100).toFixed(1).padStart(5)}%  ${named(info.names[BY[field]][v] || '(none)')}`);
       if (all > vals.length) say(`  ... and ${fmtN(all - vals.length)} more ${field} values with fewer entries${n < 60 ? ` (--limit up to 60 lists more)` : '; narrow the search to see them'}.`);
       return vals;
     };
@@ -518,7 +724,8 @@ const COMMANDS = {
     say(); say('Next:');
     if (!o.by) say(`  A longer list for one field:   ${again('count', o, pos, ['limit'], '--by process')}   (or severity, level, source, tag, subsystem, category, file)`);
     const name = first ? info.names[BY[o.by || 'process']][first[0]] : '';
-    if (name) say(`  The entries behind one line:   ${again('search', o, [...pos, termFor(o.by || 'process', name)], ['by', 'limit'])}`);
+    const by = o.by || 'process';
+    if (name && plainHere(name)) say(`  Those ${MATCHES[BY_FIELD[by]]} the first ${by} listed:   ${again('search', o, [...pos, termFor(by, name)], ['by', 'limit'])}`);
   },
 
   async histogram(o, pos) {
@@ -559,22 +766,22 @@ const COMMANDS = {
     const d = await ds.row(id), r = d.row, N = info.names, sev = info.lvlSev[r[3]], src = info.sources[r[2]], lvl = N.lvl[r[3]];
     say(`Entry ${id} (IDs run from 0 to ${fmtN(info.total - 1)}, oldest first)`);
     say(`Time:       ${fmtTime(r[1])} ${offName(offsetAt(r[1]))}${offsetAt(r[1]) ? `  =  ${Core.stamp(r[1])} UTC` : ''}`);
-    say(`Severity:   ${SEV[sev]}${lvl && lvl.toLowerCase() !== SEV[sev].toLowerCase() ? `  (the log's own level name is "${lvl}")` : ''}`);
-    say(`Source:     ${src.group}  -  ${src.path}`);
-    if (N.proc[r[4]]) say(`Process:    ${N.proc[r[4]]}${r[5] ? `  (PID ${r[5]})` : ''}`);
-    if (N.sub[r[6]]) say(`Subsystem:  ${N.sub[r[6]]}`);
-    if (N.cat[r[7]]) say(`Category:   ${N.cat[r[7]]}`);
+    say(`Severity:   ${SEV[sev]}${lvl && lvl.toLowerCase() !== SEV[sev].toLowerCase() ? `  (the log's own level name is "${named(lvl)}")` : ''}`);
+    say(`Source:     ${named(src.group)}  -  ${named(src.path)}`);
+    if (N.proc[r[4]]) say(`Process:    ${named(N.proc[r[4]])}${r[5] ? `  (PID ${r[5]})` : ''}`);
+    if (N.sub[r[6]]) say(`Subsystem:  ${named(N.sub[r[6]])}`);
+    if (N.cat[r[7]]) say(`Category:   ${named(N.cat[r[7]])}`);
     const tags = N.tag.filter((_, b) => (r[8] >> b) & 1);
-    if (tags.length) say(`Tags:       ${tags.join(', ')}`);
-    for (const [k, v] of Object.entries(d.extra || {})) if (v) say(`${(k[0].toUpperCase() + k.slice(1) + ':').padEnd(11)} ${flat(v)}`);
-    say(); say('Message:'); say(r[9]);
+    if (tags.length) say(`Tags:       ${tags.map(named).join(', ')}`);
+    for (const [k, v] of Object.entries(d.extra || {})) if (v) say(`${(k[0].toUpperCase() + k.slice(1) + ':').padEnd(11)} ${roomless(flat(v))}`);      // a path, a sender: names, like the fields above
+    say(); say('Message:'); sayTheirs(r[9]);
     const brace = r[9].indexOf('{');
     if (brace >= 0 && r[9].length < 400000) { try { const j = JSON.parse(r[9].slice(brace)); if (j && typeof j === 'object') { say(); say('The JSON in that message, laid out:'); say(JSON.stringify(j, null, 2)); } } catch (e) { /* not JSON */ } }
     if (r[10]) { say(); say('This entry is longer than 2 MB; the rest is not shown.'); }
     say(); say('Next:');
     say(`  What was logged around it:        ${run(`context ${id}`)}`);
-    if (N.proc[r[4]]) say(`  Only this process, a minute either side:   ${run(`search ${shq(`process:${/\s/.test(N.proc[r[4]]) ? `"${N.proc[r[4]]}"` : N.proc[r[4]]}`)} --around ${id} --window 1m`)}`);
-    if (d.extra && d.extra.file) say(`  The report file itself:           ${run(`cat ${shq(d.extra.file)}`)}`);
+    if (plainHere(N.proc[r[4]])) say(`  Processes whose name contains this one's, a minute either side:   ${run(`search ${shq(termFor('process', N.proc[r[4]]))} --around ${id} --window 1m`)}`);
+    if (d.extra && plainArg(d.extra.file)) say(`  The report file itself:           ${run(`cat ${shq(d.extra.file)}`)}`);
   },
 
   async context(o, pos) {
@@ -615,7 +822,7 @@ const COMMANDS = {
     say(); sayReports(list);
     const x = list[list.length - 1];
     say(); say('Next (shown for the newest report):');
-    say(`  Read the report:                     ${run(`cat ${shq(x.path)}`)}`);
+    if (plainArg(x.path)) say(`  Read the report:                     ${run(`cat ${shq(x.path)}`)}`);
     say(`  What the logs say around that time:  ${run(`context ${shq(fmtTime(x.t, false))} --window 1m`)}`);
     say(`  Errors in the five minutes before:   ${run(`search --min-severity error --from ${shq(fmtTime(x.t - 300000, false))} --to ${shq(fmtTime(x.t + 1000, false))}`)}`);
   },
@@ -627,21 +834,24 @@ const COMMANDS = {
     say(`${plural(hits.length, 'file')}${f ? ` with "${pos.join(' ')}" in the path` : ' in this bundle'}, ${fmtBytes(hits.reduce((a, x) => a + x.size, 0))} in all.`);
     say('ON TIMELINE is how many entries the file gives the merged timeline; - means it is not a log this tool reads line by line.');
     say(); say(`${'SIZE'.padStart(10)}  ${'ON TIMELINE'.padStart(11)}  PATH`);
-    for (const x of hits.slice(0, limit)) say(`${fmtBytes(x.size).padStart(10)}  ${(onTimeline(x) ? fmtN(x.rows) : '-').padStart(11)}  ${x.path}`);
+    for (const x of hits.slice(0, limit)) say(`${fmtBytes(x.size).padStart(10)}  ${(onTimeline(x) ? fmtN(x.rows) : '-').padStart(11)}  ${named(x.path)}`);
     if (hits.length > limit) say(`... and ${fmtN(hits.length - limit)} more. Add --all, or part of a path: ${run('files reports')}`);
-    say(); say('Next:');
-    say(`  Print a file:                  ${run(`cat ${shq(hits[0].path)}`)}`);
-    const log = hits.find(onTimeline);
-    if (log) say(`  One log's entries by time:     ${run(`search ${shq(`source:${log.path}`)}`)}`);
+    // the first file, and the first log, whose path can be given in a command as it is (see plainHere)
+    const first = hits.find((x) => plainArg(x.path)), log = hits.find((x) => onTimeline(x) && plainHere(x.path));
+    if (first || log) { say(); say('Next:'); }
+    if (first) say(`  Print a file:                  ${run(`cat ${shq(first.path)}`)}`);
+    if (log) say(`  Entries ${MATCHES.source} this path:   ${run(`search ${shq(termFor('file', log.path))}`)}`);
   },
 
   async cat(o, pos) {
     if (pos.length !== 1) throw new Usage(`"cat" takes the path of one file in the bundle, as "files" prints it. For example: ${run('cat summary.md')}`);
     const hits = findFiles(pos[0]), f = hits[0];
     if (!hits.length) throw new Usage(`There is no file "${pos[0]}" in this bundle. ${run('files')} lists them; part of a path is enough when only one file has it.`);
-    if (hits.length > 1) throw new Usage(`"${pos[0]}" is part of ${fmtN(hits.length)} paths. Give more of the one you want:\n${hits.slice(0, 20).map((x) => `  ${x.path}`).join('\n')}${hits.length > 20 ? '\n  ...' : ''}`);
+    if (hits.length > 1) throw new Usage(`"${pos[0]}" is part of ${fmtN(hits.length)} paths. Give more of the one you want:\n${hits.slice(0, 20).map((x) => `  ${named(x.path)}`).join('\n')}${hits.length > 20 ? '\n  ...' : ''}`);
     const got = await fileLines(f), all = got.all, cut = got.cut;
-    say(`File: ${f.path} (${fmtBytes(got.size)})${onTimeline(f) ? `. Its ${fmtN(f.rows)} entries are also on the timeline: ${run(`search ${shq(`source:${f.path}`)}`)}` : ''}`);
+    // The path to give this file by in a suggested command: its own when that can be given as it is, else what was typed.
+    const arg = [f.path, pos[0]].find(plainArg);
+    say(`File: ${named(f.path)} (${fmtBytes(got.size)})${onTimeline(f) ? `. Its ${fmtN(f.rows)} entries are also on the timeline${plainHere(f.path) ? `, among the entries ${MATCHES.source} this path: ${run(`search ${shq(termFor('file', f.path))}`)}` : ''}` : ''}`);
     if (got.empty) { say('The file is empty.'); return; }
     if (got.binary) {
       say(ODL.test(f.path) ? ODL_SAID : 'This is a binary file, so it is not printed. Its place on disk, when the bundle is a folder, is the same path under the bundle folder.');
@@ -662,51 +872,52 @@ const COMMANDS = {
       say(`${plural(hit.length, 'line')} of ${fmtN(all.length)} contain "${o.grep}" (capitals ignored)${hit.length > lim ? `; the first ${lim} are shown, --all shows every one` : ''}. Each is shown with its line number.`);
       say();
       for (const i of hit.slice(0, lim)) say(`${String(i + 1).padStart(String(all.length).length)}: ${all[i]}`);
-      if (hit.length) { say(); say('Next:'); say(`  The lines around a match:   ${run(`cat ${shq(f.path)} --lines ${Math.max(1, hit[0] + 1 - 10)}-${hit[0] + 11}`)}`); }
+      if (hit.length && arg) { say(); say('Next:'); say(`  The lines around a match:   ${run(`cat ${shq(arg)} --lines ${Math.max(1, hit[0] + 1 - 10)}-${hit[0] + 11}`)}`); }
       return;
     }
     say(`Lines ${fmtN(from)} to ${fmtN(to)} of ${fmtN(all.length)}${cut ? ` (only the first ${fmtBytes(READ_CAP)} of the file was read)` : ''}:`);
     say();
-    for (let i = from - 1; i < to; i++) say(all[i]);
-    if (to < all.length || from > 1) {
+    for (let i = from - 1; i < to; i++) sayTheirs(all[i]);
+    if (arg && (to < all.length || from > 1)) {
       say(); say('Next:');
-      if (to < all.length) say(`  The next lines:              ${run(`cat ${shq(f.path)} --lines ${to + 1}-${Math.min(all.length, to + 200)}`)}`);
-      say(`  Only lines containing text:  ${run(`cat ${shq(f.path)} --grep TEXT`)}`);
-      if (!o.all && o.lines === undefined) say(`  The whole file:              ${run(`cat ${shq(f.path)} --all`)}`);
+      if (to < all.length) say(`  The next lines:              ${run(`cat ${shq(arg)} --lines ${to + 1}-${Math.min(all.length, to + 200)}`)}`);
+      say(`  Only lines containing text:  ${run(`cat ${shq(arg)} --grep TEXT`)}`);
+      if (!o.all && o.lines === undefined) say(`  The whole file:              ${run(`cat ${shq(arg)} --all`)}`);
     }
   },
 
   async memory() {
     const groups = memoryFiles().map((g) => [g.title, g.files]);
-    const r = await ds.query({ text: 'tag:memory', bins: 1 }, () => {});
+    // Counted are the entries that carry the memory tag itself (as the page counts them). The search offered below
+    // finds every tag that holds "memory", so it can list more, and the words beside it say that.
+    const r = await ds.query({ text: 'tag:memory', bins: 1 }, () => {}), tagged = info.total ? ds.tagTimes('memory', 1).total : 0;
     say('What this bundle recorded about memory. The figures are as the collector and macOS wrote them; nothing here is interpreted.');
     if (!groups.length && !r.count) { say(); say('It holds no memory files and no log entries tagged memory.'); return; }
-    for (const [title, files] of groups) { say(); say(`${title}:`); for (const f of files.slice(0, 12)) say(`  ${fmtBytes(f.size).padStart(10)}  ${f.path}`); if (files.length > 12) say(`  ... and ${fmtN(files.length - 12)} more`); }
+    for (const [title, files] of groups) { say(); say(`${title}:`); for (const f of files.slice(0, 12)) say(`  ${fmtBytes(f.size).padStart(10)}  ${named(f.path)}`); if (files.length > 12) say(`  ... and ${fmtN(files.length - 12)} more`); }
     const csv = (memoryFiles().find((g) => g.kind === 'timeline') || { files: [] }).files[0];
     if (csv) {
       const { data, stats, levels, pids } = await memoryTimeline(csv);
-      say(); say(`${csv.path}: ${plural(data.length, 'sample')}${data.length ? `, from ${data[0][0]} to ${data[data.length - 1][0]} (the Mac's local time, as written in the file)` : ''}`);
+      say(); say(`${named(csv.path)}: ${plural(data.length, 'sample')}${data.length ? `, from ${data[0][0]} to ${data[data.length - 1][0]} (the Mac's local time, as written in the file)` : ''}`);
       for (const s of stats) say(`  ${s.name}: lowest ${fmtN(s.lo[0])}${s.unit} at ${s.lo[1][0]}, highest ${fmtN(s.hi[0])}${s.unit} at ${s.hi[1][0]}, last ${fmtN(s.last)}${s.unit}`);
       if (levels.length) say(`  pressure_level values seen: ${levels.map((v) => `${v} (${PRESSURE[v] || 'unknown'})`).join(', ')}`);
       if (pids) say(`  Excel process IDs seen: ${pids.length ? pids.join(', ') : 'none (Excel was not running at any sample)'}`);
     }
-    say(); say(`Log entries tagged memory (kernel memory-pressure and jetsam messages): ${fmtN(r.count)}`);
+    say(); say(`Log entries tagged memory (kernel memory-pressure and jetsam messages): ${fmtN(tagged)}`);
     say(); say('Next:');
     const firstFile = groups.length ? groups[0][1][0] : null;
-    if (firstFile) say(`  Print one of those files:        ${run(`cat ${shq(firstFile.path)}`)}`);
-    if (r.count) { say(`  The memory entries:              ${run('search tag:memory')}`); say(`  When they were logged:           ${run('histogram tag:memory')}`); }
+    if (firstFile && plainArg(firstFile.path)) say(`  Print one of those files:        ${run(`cat ${shq(firstFile.path)}`)}`);
+    if (r.count) { say(`  Entries ${MATCHES.tag} memory:   ${run('search tag:memory')}`); say(`  When they were logged:           ${run('histogram tag:memory')}`); }
     if (info.reports.some((x) => x.kind === 'Jetsam')) say(`  Every report, with its time:     ${run('reports')}`);
   },
 
   async export(o, pos) {
-    if (o.out === undefined) throw new Usage(`"export" needs --out and a file name to write, for example: ${again('export', o, pos, [], '--out matches.tsv')}`);
+    if (o.out === undefined) throw new Usage(`"export" needs --out and a file name to write, for example: ${again('export', o, pos, [], `--out ${shq(outName())}`)}`);
     const { q, said } = await buildQuery(o, pos), r = await ds.query(q, () => {});
     say(heading(said));
     sayNotes(r, !r.count);
     if (!r.count) { say(`0 of ${fmtN(r.total)} entries match, so no file was written.`); await sayWhyNothing(q, r, said, o); return; }
-    const blob = await ds.exportTsv(() => {});
-    fs.writeFileSync(o.out, new Uint8Array(await blob.arrayBuffer()));
-    say(`Wrote ${plural(r.count, 'entry', 'entries')} to ${path.resolve(o.out)} (${fmtBytes(blob.size)}).`);
+    const blob = await ds.exportTsv(() => {}), wrote = writeOut(o.out, new Uint8Array(await blob.arrayBuffer()));
+    say(`Wrote ${plural(r.count, 'entry', 'entries')} to ${wrote} (${fmtBytes(blob.size)}).`);
     say('It is tab-separated text with a header line and one entry per line, oldest first. The columns are:');
     say('  utc_time, severity, level, source, process, pid, subsystem, category, tags, message');
     say('utc_time is always UTC. Inside a message, a tab is written as \\t and a line break as \\n.');
@@ -761,12 +972,13 @@ Needs Node 20 or later, or Deno 2 (deno run -A; --allow-read is enough when BUND
   /jetsam|memorystatus/   A regular expression.
   -runningboardd          Leave out entries containing this. Works on phrases, regular expressions and fields too.
   process:excel           The process name contains "excel".
-  level:error             The level starts with "error". Also: fault, warning, default, info, debug, and Excel's
-                          own level names (medium, monitorable, unexpected).
-  tag:memory              The entry carries this tag. Tags: excel, excel-helper, mentions-excel, microsoft,
-                          hang-report, memory, restart, permissions, storage, logs-dropped.
+  level:error             The level, or the severity this tool counts it as, starts with "error". Also: fault,
+                          warning, default, info, debug, and Excel's own level names (medium, monitorable, unexpected).
+  tag:memory              The entry carries a tag that contains "memory". Tags: excel, excel-helper, mentions-excel,
+                          microsoft, hang-report, memory, restart, permissions, storage, logs-dropped.
   source:unified          The log it came from: part of a file path or of a source name ("summary" lists them).
-  pid:4121  subsystem:com.apple.TCC  category:xpc      The other fields.
+  pid:4121  subsystem:com.apple.TCC  category:xpc      The process ID is 4121; the subsystem or category contains the text.
+                          So process:kernel also finds kernelmanagerd, and tag:excel also finds mentions-excel.
 
   Every condition must hold (they are joined with AND). To get "either", use a regular expression: /crash|hang/
 
@@ -857,7 +1069,7 @@ Read a file that is not a log
     files: `files [TEXT] [--limit N] [--all]\n  The files in the bundle with their sizes, and how many timeline entries each log file gives.\n  TEXT keeps only paths containing it. 100 are listed unless --limit or --all is given.`,
     cat: `cat PATH [--lines A-B] [--grep TEXT] [--all]\n  Print a file from the bundle. PATH is as "files" prints it; part of a path is enough when only one file has it.\n  With no option the first 200 lines are printed.\n  --lines A-B   those lines only (A- means from A to the end).\n  --grep TEXT   only lines containing TEXT, capitals ignored, each with its line number.\n  --all         the whole file (the first 32 MB of a larger one).`,
     memory: `memory [--utc]\n  The memory-related files in the bundle, figures from the memory timeline when there is one (lowest, highest, last),\n  and how many log entries carry the memory tag. Figures only: nothing is interpreted.`,
-    export: `export [WORDS] --out FILE [search options]\n  Write every matching entry to FILE as tab-separated text: utc_time, severity, level, source, process, pid,\n  subsystem, category, tags, message. An existing FILE is replaced.`,
+    export: `export [WORDS] --out FILE [search options]\n  Write every matching entry to FILE as tab-separated text: utc_time, severity, level, source, process, pid,\n  subsystem, category, tags, message. An existing FILE is replaced.\n  FILE has to be outside the bundle folder: export does not write into the folder it reads, and it does not write\n  through a link. The path of the file that was written is printed.`,
     clean: `clean\n  Delete the folders this tool unpacked zips into, which are under the system's temporary folder.\n  A zip is unpacked there the first time it is opened, so later commands start faster. Opening a folder unpacks nothing.`,
   };
   TOPICS.help = TOPICS[''];

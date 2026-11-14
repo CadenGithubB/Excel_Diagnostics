@@ -88,7 +88,7 @@ describe('request mode: choosing the bundle', () => {
   it('part of one id is completed, a note says to what, and the calls in next use the whole id', async () => {
     const d = await ask(await three(), 'files', { bundle: 'hang' });
     assert.equal(d.bundle, HANG);
-    assert.deepEqual(d.notes, [`bundle "hang" was read as ${HANG}.`]);
+    assert.deepEqual(d.notes, [`bundle "hang" was read as "${HANG}".`]);
     assert.equal(d.next, `excel_diag_read_file {path: "notes.txt", bundle: "${HANG}"} reads the first file listed. If this answers the question, reply now.`);
   });
 
@@ -100,7 +100,7 @@ describe('request mode: choosing the bundle', () => {
   it('an id that is nowhere is refused with the ids there are, and no bundle is opened in its place', async () => {
     const d = await ask(await three(), 'search', { bundle: 'Excel_Diagnostics_repro_20260404_000000', query: 'pivot' });
     assert.deepEqual(doc(d), { ok: false, error: 'no such bundle', field: 'bundle',
-      hint: `No bundle id is or contains "Excel_Diagnostics_repro_20260404_000000". The bundles here, newest first: ${WATCH}, ${HANG}, ${COLLECT}. Send one of these ids as bundle, or leave bundle out for the newest; do not guess an id.` });
+      hint: `No bundle id is or contains "Excel_Diagnostics_repro_20260404_000000". The bundles here, newest first: "${WATCH}", "${HANG}", "${COLLECT}". Send one of these ids as bundle, or leave bundle out for the newest; do not guess an id.` });
   });
 
   it('a name shaped like a path, or starting with a dot, is refused before any folder is looked at', async () => {
@@ -131,7 +131,7 @@ describe('request mode: choosing the bundle', () => {
     assert.deepEqual(summary.receipt.availableBundles, ['Batch_12', 'Batch_11', 'Batch_10', 'Batch_09', 'Batch_08', 'Batch_07', 'Batch_06', 'Batch_05', 'Batch_04', 'Batch_03']);
     assert.equal(many.candidates.length, 10);
     assert.equal(many.hint, '"batch" is part of 12 bundle ids. Send one of the candidates, whole, as bundle.');
-    assert.match(none.hint, /newest first: Batch_12, Batch_11, .*Batch_03, and 2 more\. Send one of these ids/);
+    assert.match(none.hint, /newest first: "Batch_12", "Batch_11", .*"Batch_03", and 2 more\. Send one of these ids/);
   });
 
   it('an id with spaces and quotation marks is an id like any other', async () => {
@@ -147,7 +147,7 @@ describe('request mode: choosing the bundle', () => {
     await bundle(dir, 'Full_one', '2026-01-01T00:00:00Z');
     await bundle(dir, 'Empty_one', '2026-02-02T00:00:00Z', {});
     const d = await ask(dir, 'summary');
-    assert.deepEqual(doc(d), { ok: false, error: 'the bundle is empty', field: 'bundle', hint: 'Bundle Empty_one holds no files. Other bundles here: Full_one. Send one of them as bundle.' });
+    assert.deepEqual(doc(d), { ok: false, error: 'the bundle is empty', field: 'bundle', hint: 'Bundle "Empty_one" holds no files. Other bundles here: "Full_one". Send one of them as bundle.' });
   });
 
   it('a bundles folder that is not a folder is reported as such, without its path', async () => {
@@ -169,18 +169,18 @@ describe('request mode: a zip is a bundle', () => {
     assert.equal(first.ok, true);
     assert.equal(first.bundle, SAMPLE_ID, 'the id is the file name without .zip');
     assert.equal(first.receipt.entries, 32861);
-    assert.equal(first.receipt.files, 15);
+    assert.equal(first.receipt.files, 17);
     assert.deepEqual(first.receipt.availableBundles, [SAMPLE_ID]);
     assert.match(first.stderr, /Unpacking Excel_Diagnostics_sample\.zip/, 'progress goes to standard error');
     assert.deepEqual(await tree(dir), before, 'nothing is written in the bundles folder');
     const unpacked = (await fs.readdir(cache)).filter((n) => n.startsWith(SAMPLE_ID));
     assert.equal(unpacked.length, 1, 'the zip is unpacked once, under cacheDir');
     const second = await ask(dir, 'search', { query: 'pivot', limit: 1 }, { cacheDir: cache });
-    assert.equal(second.receipt.matched, 3838);
+    assert.equal(second.receipt.matched, 3839);
     assert.ok(!second.stderr.includes('Unpacking'), 'a later request reads what was unpacked');
     const text = await ask(dir, 'read_file', { path: 'summary.md', limit: 1, bundle: 'sample' }, { cacheDir: cache });
     assert.equal(text.text, '# Excel diagnostics summary');
-    assert.deepEqual(text.notes, [`bundle "sample" was read as ${SAMPLE_ID}.`]);
+    assert.deepEqual(text.notes, [`bundle "sample" was read as "${SAMPLE_ID}".`]);
   });
 
   it('two requests that unpack the same zip at once both get the whole bundle', { skip: NO_DITTO }, async () => {
@@ -189,7 +189,7 @@ describe('request mode: a zip is a bundle', () => {
     const answers = await Promise.all([ask(dir, 'summary', {}, { cacheDir: cache }), ask(dir, 'count', {}, { cacheDir: cache }), ask(dir, 'files', {}, { cacheDir: cache })]);
     assert.equal(answers[0].receipt.entries, 32861);
     assert.equal(answers[1].receipt.matched, 32861);
-    assert.equal(answers[2].receipt.files, 15);
+    assert.equal(answers[2].receipt.files, 17);
     assert.deepEqual((await fs.readdir(cache)).filter((n) => n.includes('.part-')), [], 'no half-unpacked folder is left behind');
   });
 
@@ -227,7 +227,7 @@ describe('request mode: a zip is a bundle', () => {
     assert.equal(d.ok, false);
     assert.equal(d.error, 'the bundle could not be opened');
     assert.equal(d.field, 'bundle');
-    assert.equal(d.hint, 'Bundle Broken_bundle could not be read as a zip file: This does not look like a zip file (no end-of-central-directory record). Tell the human that. Other bundles here: Older_good_one. Send one of them as bundle.');
+    assert.equal(d.hint, 'Bundle "Broken_bundle" could not be read as a zip file. Tell the human that. Other bundles here: "Older_good_one". Send one of them as bundle.');
     assert.ok(!/may be|damaged|because/.test(d.hint), 'what went wrong is passed on; why is not guessed at');
     const other = await ask(dir, 'files', { bundle: 'Older_good_one' });
     assert.equal(other.ok, true, 'the other bundle is still usable');

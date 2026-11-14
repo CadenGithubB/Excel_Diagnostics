@@ -27,6 +27,8 @@ const TIMEOUT_USUAL = 120;                                // seconds one call ma
 const TIMEOUT_LEAST = 5;
 const TIMEOUT_MOST = 600;
 const OUTPUT_MOST = 2 * 1024 * 1024;                      // bytes of standard output taken from one run of the program
+const RESULT_MOST = 200000;                               // characters of one result handed to the model
+
 const REPEAT_REFUSED = 3;                                 // which identical call in a row is refused
 const REPEAT_WINDOW_MS = 30 * 60_000;
 const SESSIONS_MOST = 200;
@@ -284,6 +286,23 @@ const NO_ANSWER_HINT = {
 const noAnswer = (cause) => ({ ok: false, error: NO_ANSWER, hint: NO_ANSWER_HINT[cause] });
 
 const block = (text) => ({ type: 'text', text });
+// The details as the one JSON line the model reads. A value from a bundle (its id, a name, a path) can hold a
+// character that JSON leaves as it is and that breaks a line, turns text round or takes no room: a C1 control,
+// U+2028 or U+2029, a direction override or isolate, every character Unicode calls default-ignorable (a direction
+// mark, a zero-width character, a variation selector, the byte order mark, a soft hyphen, a tag character, a Hangul
+// filler and the like), and the interlinear annotation marks. Each is written as its escape (one past U+FFFF as the
+// two escapes of its UTF-16 pair), so the line still parses to the same details and is read as one line, the right
+// way round, with nothing unseen. The set is the program's own (hidden() in excel_diagnostics_cli.mjs), which
+// measures the facts of a result written this way to keep them within their size: the two change together.
+const escaped = (n) => (n >= 127 && n <= 159) || n === 0x2028 || n === 0x2029 || (n >= 0x202a && n <= 0x202e) || (n >= 0x2066 && n <= 0x2069)
+  || n === 0xad || n === 0x34f || n === 0x61c || n === 0x115f || n === 0x1160 || n === 0x17b4 || n === 0x17b5 || (n >= 0x180b && n <= 0x180f)
+  || (n >= 0x200b && n <= 0x200f) || (n >= 0x2060 && n <= 0x206f) || n === 0x3164 || (n >= 0xfe00 && n <= 0xfe0f) || n === 0xfeff || n === 0xffa0
+  || (n >= 0xfff0 && n <= 0xfffb) || (n >= 0x1bca0 && n <= 0x1bca3) || (n >= 0x1d173 && n <= 0x1d17a) || (n >= 0xe0000 && n <= 0xe0fff);
+function jsonLine(v) {
+  let out = '';
+  for (const c of JSON.stringify(v)) out += escaped(c.codePointAt(0)) ? c.split('').map((u) => `\\u${u.charCodeAt(0).toString(16).padStart(4, '0')}`).join('') : c;
+  return out;
+}
 // The names are said back bare, as the model wrote them, in one sentence it can act on.
 function ignoredSaid(tool, names) {
   if (names.length === 1) return `${names[0]} is not a field of ${tool} and was ignored, so this result is not narrowed by it. Send the call again with one of the allowed fields if it mattered.`;
@@ -298,14 +317,25 @@ function failure(tool, doc, more) {
   for (const key of ['field', 'hint']) if (typeof doc[key] === 'string' && doc[key]) details[key] = doc[key];
   if (Array.isArray(doc.candidates)) details.candidates = doc.candidates.filter((c) => typeof c === 'string');
   Object.assign(details, more);
-  return { content: [block(JSON.stringify(details))], details, isError: true };
+  return { content: [block(jsonLine(details))], details, isError: true };
+}
+
+// What to send for a smaller result, said only with arguments the tool has: naming one it does not have would send
+// the model after an argument that narrows nothing. A tool with none of them gets a sentence that names none.
+const SMALLER = [['limit', 'a smaller limit'], ['maxChars', 'a smaller maxChars'], ['query', 'a narrower query'], ['filter', 'a filter that keeps fewer files'],
+  ['grep', 'a grep that keeps fewer lines'], ['before', 'a smaller before and after'], ['window', 'a shorter window'], ['bins', 'fewer bins']];
+function tooLargeSaid(tool, size, known) {
+  const ways = SMALLER.filter(([name]) => known.has(name)).map(([, said]) => said).slice(0, 3);
+  const led = `The result of ${tool} came to ${size} characters, more than is passed on in one result.`;
+  if (!ways.length) return `${led} ${tool} has no argument that makes its result smaller: tell the human that this result is too large to pass on, and do not send the same call again.`;
+  return `${led} Ask for less: ${ways.length === 1 ? ways[0] : `${ways.slice(0, -1).join(', ')} or ${ways[ways.length - 1]}`}.`;
 }
 
 // A success is up to four blocks in a fixed order. Corrections come first, so the model reads how its call was
 // taken before it reads the result. "Next:" comes last, so what could be done next is the last thing it reads
 // before its own turn. The quoted lines stay plain text between them: inside a JSON string every quotation mark
 // and line break in a log message would be escaped, and a model copies what it sees.
-function success(tool, doc, more, ignored) {
+function success(tool, doc, more, ignored, known) {
   const details = { ok: true, tool };
   if (typeof doc.bundle === 'string' && doc.bundle) details.bundle = doc.bundle;
   Object.assign(details, isObject(doc.receipt) ? doc.receipt : {}, more, { ok: true, tool });
@@ -313,9 +343,15 @@ function success(tool, doc, more, ignored) {
   if (ignored.length) notes.unshift(ignoredSaid(tool, ignored));
   const content = [];
   if (notes.length) content.push(block(`Facts about this call:\n${notes.map((n) => `- Fact: ${n}`).join('\n')}`));
-  content.push(block(JSON.stringify(details)));
+  content.push(block(jsonLine(details)));
   if (typeof doc.text === 'string' && doc.text) content.push(block(doc.text));
   if (typeof doc.next === 'string' && doc.next) content.push(block(`Next: ${doc.next}`));
+  // One ceiling on everything handed to the model, whatever the program printed. The program cuts what a bundle
+  // can make long; this is the second lock, for anything it did not.
+  const size = content.reduce((n, c) => n + c.text.length, 0);
+  if (size > RESULT_MOST) {
+    return failure(tool, { bundle: doc.bundle, error: 'the result was too large to pass on', hint: tooLargeSaid(tool, size, known) });
+  }
   return { content, details };
 }
 
@@ -397,7 +433,7 @@ export function register(api, deps = {}) {
       const request = { format: 1, op: tool.slice(PREFIX.length), bundlesDir, ...(cacheDir ? { cacheDir } : {}), params };
       const outcome = await run(request, { cliPath, timeoutMs, signal });
       const doc = documentOf(outcome);
-      if (doc && doc.ok === true) return success(tool, doc, more, ignored);
+      if (doc && doc.ok === true) return success(tool, doc, more, ignored, known);
       if (doc && doc.ok === false && typeof doc.error === 'string' && doc.error) return failure(tool, doc, more);
       const cause = outcome?.cause === 'timeout' || outcome?.cause === 'cancelled' ? outcome.cause
         : run === runProgram && !fs.existsSync(cliPath) ? 'missing' : outcome?.cause === 'start' ? 'start' : 'silent';

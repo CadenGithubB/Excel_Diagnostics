@@ -71,7 +71,7 @@ const EXPECTED = [
       '            1    0.1%  Crash',
       '',
       'Next:',
-      '  The entries behind one line:  CLI sample search level:Error --min-severity warning',
+      '  Those whose level or severity starts with the first level listed:  CLI sample search level:Error --min-severity warning',
       '',
     ].join('\n') },
   { title: 'histogram prints an interval per line, with bars',
@@ -142,17 +142,17 @@ const EXPECTED = [
   { title: 'cat prints lines of a file',
     args: ['sample', 'cat', 'summary.md', '--lines', '1-5'],
     stdout: [
-      'File: summary.md (935 B)',
-      'Lines 1 to 5 of 23:',
+      'File: summary.md (940 B)',
+      'Lines 1 to 5 of 24:',
       '',
       '# Excel diagnostics summary',
       '',
-      'This is made-up sample data that ships with the viewer. It tells one story: Excel\'s memory climbs for an hour and a half, a PivotTable filter pushes it over the limit, and Excel crashes at 2026-03-10 10:35:00 local time and is relaunched.',
+      'This is made-up sample data that ships with the viewer. In it, Excel\'s memory climbs for an hour and a half, a PivotTable filter is asked for, Excel crashes at 2026-03-10 10:35:00 local time, and it is started again.',
       '',
       '- Collected: 2026-03-10 12:03:40 EDT',
       '',
       'Next:',
-      '  The next lines:              CLI sample cat summary.md --lines 6-23',
+      '  The next lines:              CLI sample cat summary.md --lines 6-24',
       '  Only lines containing text:  CLI sample cat summary.md --grep TEXT',
       '',
     ].join('\n') },
@@ -185,10 +185,10 @@ const EXPECTED = [
       'Log entries tagged memory (kernel memory-pressure and jetsam messages): 2,856',
       '',
       'Next:',
-      '  Print one of those files:     CLI sample cat excel_memory_timeline.csv',
-      '  The memory entries:           CLI sample search tag:memory',
-      '  When they were logged:        CLI sample histogram tag:memory',
-      '  Every report, with its time:  CLI sample reports',
+      '  Print one of those files:                 CLI sample cat excel_memory_timeline.csv',
+      '  Entries with a tag that contains memory:  CLI sample search tag:memory',
+      '  When they were logged:                    CLI sample histogram tag:memory',
+      '  Every report, with its time:              CLI sample reports',
       '',
     ].join('\n') },
 ];
@@ -220,7 +220,7 @@ describe('text command line: unchanged by request mode', () => {
     assert.equal(r.code, 0);
     const lines = normal(r.stdout).split('\n'), added = 'For programs: "CLI request" reads one JSON request from standard input and prints one JSON document in answer.';
     assert.equal(lines.filter((l) => l === added).length, 1);
-    assert.deepEqual(lines.filter((l) => l !== added).slice(0, 3), ['Excel diagnostics, command-line tool 1.0', '', 'Searches a bundle made by excel_diagnostics.sh (the collector for Excel slowdowns, hangs and crashes on macOS)']);
+    assert.deepEqual(lines.filter((l) => l !== added).slice(0, 3), ['Excel diagnostics, command-line tool 1.1', '', 'Searches a bundle made by excel_diagnostics.sh (the collector for Excel slowdowns, hangs and crashes on macOS)']);
     assert.equal(lines.length, 37, 'one line more than before');
     assert.ok(lines.indexOf(added) === lines.findIndex((l) => l.startsWith('Exit status:')) + 1, 'it sits with the other notes for callers');
   });

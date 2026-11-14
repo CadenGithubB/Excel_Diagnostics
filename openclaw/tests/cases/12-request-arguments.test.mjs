@@ -53,9 +53,9 @@ const BAD = [
   ['context', {}, 'id'], ['context', { id: 5, time: '2026-03-10 09:00' }, 'time'], ['context', { id: 99999 }, 'id'], ['context', { id: '5' }, 'id'], ['context', { time: 'nonsense' }, 'time'], ['context', { time: 1773147600 }, 'time'],
   ['context', { id: 5, before: -1 }, 'before'], ['context', { id: 5, after: '8' }, 'after'], ['context', { id: 5, window: 'abc' }, 'window'], ['context', { id: 5, maxChars: 0 }, 'maxChars'],
   ['reports', { utc: 'no' }, 'utc'], ['memory', { utc: 0 }, 'utc'],
-  ['files', { limit: 0 }, 'limit'], ['files', { offset: -1 }, 'offset'], ['files', { offset: 15 }, 'offset'], ['files', { filter: 5 }, 'filter'], ['files', { filter: ['a'] }, 'filter'],
+  ['files', { limit: 0 }, 'limit'], ['files', { offset: -1 }, 'offset'], ['files', { offset: 17 }, 'offset'], ['files', { filter: 5 }, 'filter'], ['files', { filter: ['a'] }, 'filter'],
   ['read_file', {}, 'path'], ['read_file', { path: 5 }, 'path'], ['read_file', { path: '../../etc/passwd' }, 'path'], ['read_file', { path: '/etc/passwd' }, 'path'], ['read_file', { path: 'summary.md/../../x' }, 'path'],
-  ['read_file', { path: 'reports' }, 'path'], ['read_file', { path: 'summary.md', fromLine: 0 }, 'fromLine'], ['read_file', { path: 'summary.md', fromLine: 24 }, 'fromLine'], ['read_file', { path: 'summary.md', fromLine: '2' }, 'fromLine'],
+  ['read_file', { path: 'reports' }, 'path'], ['read_file', { path: 'summary.md', fromLine: 0 }, 'fromLine'], ['read_file', { path: 'summary.md', fromLine: 25 }, 'fromLine'], ['read_file', { path: 'summary.md', fromLine: '2' }, 'fromLine'],
   ['read_file', { path: 'summary.md', limit: 0 }, 'limit'], ['read_file', { path: 'summary.md', grep: 5 }, 'grep'],
   ['summary', { bundle: 5 }, 'bundle'], ['summary', { bundle: ['x'] }, 'bundle'],
 ];
@@ -186,7 +186,7 @@ describe('request mode: a broken request still gets one JSON document', () => {
     }
     const missing = await send({ format: 1, op: 'files', bundlesDir });
     assert.equal(missing.ok, true, 'params left out is the same as no arguments');
-    assert.equal(missing.receipt.files, 15);
+    assert.equal(missing.receipt.files, 17);
   });
 
   it('a request larger than 1 MB is refused before it is read as JSON', async () => {
@@ -201,7 +201,7 @@ describe('request mode: a broken request still gets one JSON document', () => {
     assert.equal(regex.ok, true);
     assert.match(regex.notes.join(' '), /not a valid regular expression/);
     assert.equal(long.ok, true);
-    assert.equal(long.receipt.matched, 3838);
+    assert.equal(long.receipt.matched, 3839);
   });
 
   it('cleanup', async () => { await cleanup(); });

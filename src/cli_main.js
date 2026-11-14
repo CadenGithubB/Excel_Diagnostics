@@ -45,19 +45,23 @@ if (process.argv[2] === 'request') {
       say(); say(`For the list of commands: ${RUNTIME} ${shq(SCRIPT)} help`);
       process.exitCode = 2;
     } else {
-      say(`Could not finish: ${err && err.message ? err.message : err}`);
+      // what went wrong is one line: a message from the file system quotes a path, and a path can come from the bundle
+      say(`Could not finish: ${named(err && err.message ? err.message : err)}`);
       process.exitCode = 1;
     }
   }
   // line the commands of each "Next:" list up under one another
   for (let i = 0; i < lines.length; i++) {
-    if (!/^Next( \(.*\))?:$/.test(lines[i])) continue;
+    if (theirs.has(i) || !/^Next( \(.*\))?:$/.test(lines[i])) continue;
     const block = [];
-    for (let j = i + 1; j < lines.length; j++) { const m = /^  (.*?):\s{2,}((?:node|deno run -A) .*)$/.exec(lines[j]); if (!m) break; block.push([j, m[1], m[2]]); }
+    for (let j = i + 1; j < lines.length && !theirs.has(j); j++) { const m = /^  (.*?):\s{2,}((?:node|deno run -A) .*)$/.exec(lines[j]); if (!m) break; block.push([j, m[1], m[2]]); }
     const w = block.reduce((a, x) => Math.max(a, x[1].length), 0);
     for (const [j, label, command] of block) lines[j] = `  ${(label + ':').padEnd(w + 1)}  ${command}`;
   }
-  const text = lines.join('\n') + '\n';
+  // What is printed holds text from the bundle: shown() (at the top of the text commands) keeps every control
+  // character in it from reaching the terminal.
+  const text = shown(lines.join('\n')) + '\n';
   if (process.exitCode) process.stderr.write(text); else process.stdout.write(text);
+
 }
 if (lastFd) fs.closeSync(lastFd.fd);

@@ -42,13 +42,13 @@ describe('request mode: each operation on the sample bundle', () => {
     const r = d.receipt;
     assert.equal(r.bundle, SAMPLE_ID);
     assert.equal(r.collectorMode, undefined, 'the sample id names no collector mode');
-    assert.equal(r.files, 15);
+    assert.equal(r.files, 17);
     assert.ok(Number.isInteger(r.bytes) && r.bytes > 5e6);
     assert.equal(r.entries, 32861);
     assert.deepEqual(r.period, { from: '2026-03-10 09:00:00', to: '2026-03-10 11:59:59' });
     assert.equal(r.timeZone, 'UTC-04:00');
     assert.deepEqual(r.bySeverity, { Fault: 2, Error: 1058, Warning: 235, Notice: 11381, Info: 17312, Debug: 2873 });
-    assert.equal(r.byTag.memory, 2856);
+    assert.deepEqual(r.byTag.find((x) => x.tag === 'memory'), { tag: 'memory', entries: 2856 });
     assert.equal(r.topProcesses.length, 8);
     assert.deepEqual(r.topProcesses[0], { process: 'Microsoft Excel', entries: 18561 });
     assert.equal(r.processes, 14);
@@ -77,11 +77,11 @@ describe('request mode: each operation on the sample bundle', () => {
     const [second, last] = await Promise.all([ask('search', { minSeverity: 'error', limit: 5, offset: 5 }), ask('search', { query: 'pivot', newest: true, limit: 2 })]);
     assert.deepEqual(second.receipt.shown, { first: 6, last: 10 });
     assert.equal(second.receipt.nextOffset, 10);
-    assert.deepEqual(last.receipt.shown, { first: 3837, last: 3838 });
-    assert.equal(last.receipt.matched, 3838);
+    assert.deepEqual(last.receipt.shown, { first: 3838, last: 3839 });
+    assert.equal(last.receipt.matched, 3839);
     assert.equal(last.receipt.truncated, true, 'earlier matches exist');
     assert.equal(last.receipt.nextOffset, undefined, 'nothing comes after the newest');
-    checkNext(last.next, 'excel_diag_search {query: "pivot", limit: 2, offset: 3834}');
+    checkNext(last.next, 'excel_diag_search {query: "pivot", limit: 2, offset: 3835}');
   });
 
   it('search reads the viewer syntax, a window and matchCase, and keeps a message on one line', async () => {
@@ -139,7 +139,7 @@ describe('request mode: each operation on the sample bundle', () => {
     assert.deepEqual(both.receipt.withoutEach, [{ without: 'minSeverity', matched: 0 }, { without: 'the query term zzzznothing', matched: 1060 }]);
     checkNext(both.next, 'excel_diag_count {minSeverity: "error"}');
     assert.equal(tag.receipt.matched, 0);
-    assert.match(tag.notes[0], /no tag in this bundle contains "nosuchtag".*The tags here are/);
+    assert.deepEqual(tag.notes, ['tag:nosuchtag: no tag in this bundle contains "nosuchtag", so it matches no entries. excel_diag_count {by: "tag"} lists every tag.'], 'the names of the tags are not in the sentence; the call that lists them is');
   });
 
   it('count without by gives the largest values of four fields, and no text', async () => {
@@ -267,14 +267,14 @@ describe('request mode: each operation on the sample bundle', () => {
 
   it('files lists paths with sizes and timeline entries, and filter narrows by part of a path', async () => {
     const [all, some, none] = await Promise.all([ask('files'), ask('files', { filter: 'REPORT' }), ask('files', { filter: 'zzzz' })]);
-    assert.equal(all.receipt.files, 15);
+    assert.equal(all.receipt.files, 17);
     assert.equal(all.receipt.filter, undefined);
-    assert.deepEqual(all.receipt.shown, { first: 1, last: 15 });
+    assert.deepEqual(all.receipt.shown, { first: 1, last: 17 });
     assert.equal(all.receipt.truncated, false);
     assert.match(all.text.split('\n')[0], /^\s*SIZE\s+TIMELINE_ENTRIES\s+PATH$/);
     assert.match(all.text, /^\s*[\d.]+ [KM]B\s+23874\s+unified_logs\/2026-03-10\.tsv$/m);
     assert.match(all.text, /^\s*[\d.]+ K?B\s+-\s+summary\.md$/m);
-    assert.deepEqual({ filter: some.receipt.filter, files: some.receipt.files, filesInBundle: some.receipt.filesInBundle }, { filter: 'REPORT', files: 3, filesInBundle: 15 });
+    assert.deepEqual({ filter: some.receipt.filter, files: some.receipt.files, filesInBundle: some.receipt.filesInBundle }, { filter: 'REPORT', files: 3, filesInBundle: 17 });
     checkNext(some.next, `excel_diag_read_file {path: "${JETSAM_REPORT}"}`);
     assert.equal(none.ok, true);
     assert.equal(none.receipt.files, 0);
@@ -285,13 +285,13 @@ describe('request mode: each operation on the sample bundle', () => {
 
   it('read_file gives lines of a file and how to go on', async () => {
     const d = await ask('read_file', { path: 'summary.md', limit: 5 });
-    assert.deepEqual(d.receipt, { path: 'summary.md', bytes: 935, lines: 23, shown: { fromLine: 1, toLine: 5 }, truncated: true, nextFromLine: 6 });
+    assert.deepEqual(d.receipt, { path: 'summary.md', bytes: 940, lines: 24, shown: { fromLine: 1, toLine: 5 }, truncated: true, nextFromLine: 6 });
     const lines = d.text.split('\n');
     assert.equal(lines.length, 5);
     assert.equal(lines[0], '# Excel diagnostics summary');
     checkNext(d.next, 'excel_diag_read_file {path: "summary.md", fromLine: 6, limit: 5}');
     const rest = await ask('read_file', { path: 'summary.md', fromLine: 6 });
-    assert.deepEqual(rest.receipt.shown, { fromLine: 6, toLine: 23 });
+    assert.deepEqual(rest.receipt.shown, { fromLine: 6, toLine: 24 });
     assert.equal(rest.receipt.truncated, false);
     assert.equal(rest.receipt.nextFromLine, undefined);
   });
@@ -299,7 +299,7 @@ describe('request mode: each operation on the sample bundle', () => {
   it('read_file accepts a unique name or part of a path and says which file it read', async () => {
     const [byName, byPart, log] = await Promise.all([ask('read_file', { path: 'crash_summary.txt' }), ask('read_file', { path: 'footprint', limit: 2 }), ask('read_file', { path: 'office/autoupdate.log', limit: 1 })]);
     assert.equal(byName.receipt.path, 'reports/crash_summary.txt');
-    assert.deepEqual(byName.notes, ['path "crash_summary.txt" was read as reports/crash_summary.txt.']);
+    assert.deepEqual(byName.notes, ['path "crash_summary.txt" was read as "reports/crash_summary.txt".']);
     assert.equal(byPart.receipt.path, 'office/excel_footprint.txt');
     assert.equal(log.receipt.timelineEntries, 40);
     assert.deepEqual(log.notes, []);
@@ -310,7 +310,7 @@ describe('request mode: each operation on the sample bundle', () => {
     const [hit, miss] = await Promise.all([ask('read_file', { path: 'summary.md', grep: 'COMPLETE' }), ask('read_file', { path: 'summary.md', grep: 'zzzz' })]);
     assert.equal(hit.receipt.grep, 'COMPLETE');
     assert.equal(hit.receipt.matchedLines, 4);
-    assert.equal(hit.receipt.lines, 23);
+    assert.equal(hit.receipt.lines, 24);
     assert.equal(hit.receipt.truncated, false);
     const lines = hit.text.split('\n');
     assert.equal(lines.length, 4);
@@ -374,7 +374,7 @@ describe('request mode: each operation on the sample bundle', () => {
     checkNext(allowed.next, 'excel_diag_histogram {bundle: "sample"}');
     // Without the test switch, "sample" is a name like any other: here it is part of the one bundle's id.
     assert.equal(ordinary.bundle, SAMPLE_ID);
-    assert.deepEqual(ordinary.notes, [`bundle "sample" was read as ${SAMPLE_ID}.`]);
+    assert.deepEqual(ordinary.notes, [`bundle "sample" was read as "${SAMPLE_ID}".`]);
   });
 
   it('cleanup', async () => { await cleanup(); });

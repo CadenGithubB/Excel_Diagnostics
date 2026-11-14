@@ -52,15 +52,18 @@ describe('request mode: unpacked copies nobody can use are removed', () => {
     assert.deepEqual(await names(zips), ['Kept_bundle.zip', 'Replaced_bundle.zip'], 'no zip is touched');
   });
 
-  it('a part-made folder goes once it is old; a new one may still be being written and stays', async () => {
+  it('a part-made folder goes once it is old, or once the run that was making it is over; one still being written stays', async () => {
     const cache = await emptyDir('cache');
-    await unpacked(cache, 'Stopped_bundle-9-1700000000000.part-4242', '/nowhere/Stopped_bundle.zip');
-    await unpacked(cache, 'Stopped_earlier-9-1700000000000.part-17', null);
-    await unpacked(cache, 'Running_bundle-9-1700000000000.part-4343', null);
+    // A part-made folder ends in the process id of the run that is making it. This test's own process is running;
+    // 2147483646 is as high as a process id can be written and is no process.
+    const running = `Running_bundle-9-1700000000000.part-${process.pid}`;
+    await unpacked(cache, 'Stopped_bundle-9-1700000000000.part-2147483646', '/nowhere/Stopped_bundle.zip');
+    await unpacked(cache, `Stopped_earlier-9-1700000000000.part-${process.pid}`, null);
+    await unpacked(cache, running, null);
     const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    for (const name of ['Stopped_bundle-9-1700000000000.part-4242', 'Stopped_earlier-9-1700000000000.part-17']) await fs.utimes(path.join(cache, name), old, old);
+    await fs.utimes(path.join(cache, `Stopped_earlier-9-1700000000000.part-${process.pid}`), old, old);
     await summary(await sampleBundlesDir(), cache);
-    assert.deepEqual(await names(cache), ['Running_bundle-9-1700000000000.part-4343']);
+    assert.deepEqual(await names(cache), [running]);
   });
 
   it('what the program did not make is left as it is, and no link is followed', async () => {

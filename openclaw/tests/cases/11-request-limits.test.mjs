@@ -220,10 +220,13 @@ describe('request mode: a number over the most is lowered, and a note says so', 
     assert.match(lines[1], /^2026-02-02 13:00:05  Crash /, 'the five oldest are the ones left out');
     assert.match(lines[80], /^2026-02-02 13:01:24  Jetsam /);
     assert.equal(d.notes.length, 2);
-    assert.equal(d.notes[0], 'This bundle holds 85 report files and the 80 newest are listed. Each report is also a timeline entry: excel_diag_search {query: "source:\\"crash and hang reports\\""} lists them all, oldest first.');
+    assert.equal(d.notes[0], 'This bundle holds 85 report files and the 80 newest are listed. Each report is also a timeline entry: excel_diag_search {query: "source:\\"crash and hang reports\\""} lists them all, oldest first, a page at a time: send nextOffset as offset for the next page.');
     assert.ok(d.next.includes('JetsamEvent-2026-02-02-130124.ips'), 'next is about the newest report');
     const every = await askWide('search', { query: 'source:"crash and hang reports"', limit: 1 });
     assert.equal(every.receipt.matched, 85, 'the search the note gives does list them all');
+    // as it is sent, that search lists one page, which does not hold them all: so the note says it lists a page at a time
+    const first = await askWide('search', { query: 'source:"crash and hang reports"' });
+    assert.ok(first.receipt.shown.last < 85 && first.receipt.nextOffset === first.receipt.shown.last, JSON.stringify(first.receipt));
   });
 
   it('summary: 40 log sources listed, with the way to the others', async () => {
@@ -244,7 +247,8 @@ describe('request mode: a number over the most is lowered, and a note says so', 
     assert.equal(d.receipt.filesNotListed, 2);
     assert.equal(d.receipt.truncated, true);
     assert.equal(d.notes.length, 1);
-    assert.equal(d.notes[0], '2 more memory files are in this bundle than files lists. excel_diag_files {filter: "reports/"} lists them.');
+    // of the filters that every file left out matches, the one that matches fewest: "reports/" holds 71 crash reports too
+    assert.equal(d.notes[0], '2 more memory files of kind jetsamReport are in this bundle than files lists. excel_diag_files {filter: "JetsamEvent"} lists them among others.');
     assert.equal(d.receipt.timeline, undefined);
   });
 });

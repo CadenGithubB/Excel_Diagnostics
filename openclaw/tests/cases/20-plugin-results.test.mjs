@@ -183,7 +183,7 @@ describe('plugin results: each tool on the sample bundle', () => {
 
   it('excel_diag_files: a cut list says so and gives the offset to go on from', async () => {
     const env = await ok('excel_diag_files', { limit: 5 }, { text: true, next: true });
-    assert.equal(env.details.files, 15);
+    assert.equal(env.details.files, 17);
     assert.equal(env.details.truncated, true);
     assert.equal(env.details.nextOffset, 5);
     assert.match(blocks(env)[1].split('\n')[0], /^\s*SIZE\s+TIMELINE_ENTRIES\s+PATH$/);
@@ -227,7 +227,7 @@ describe('plugin results: each tool on the sample bundle', () => {
 describe('plugin results: notes, nothing found, refusals', () => {
   it('a note from the program comes first, as a fact', async () => {
     const env = await ok('excel_diag_search', { query: 'crash', bundle: 'sample' }, { facts: true, text: true, next: true });
-    assert.equal(blocks(env)[0], `${FACTS}\n- Fact: bundle "sample" was read as ${SAMPLE_ID}.`);
+    assert.equal(blocks(env)[0], `${FACTS}\n- Fact: bundle "sample" was read as "${SAMPLE_ID}".`);
     assert.equal(env.details.notes, undefined, 'the notes are said once, in their own block');
   });
 
@@ -235,7 +235,7 @@ describe('plugin results: notes, nothing found, refusals', () => {
     const env = await ok('excel_diag_search', { query: 'crash', bundle: 'sample', limit: 500 }, { facts: true, text: true, next: true });
     assert.deepEqual(blocks(env)[0].split('\n'), [
       FACTS,
-      `- Fact: bundle "sample" was read as ${SAMPLE_ID}.`,
+      `- Fact: bundle "sample" was read as "${SAMPLE_ID}".`,
       '- Fact: limit 500 is more than this tool returns in one call; 80 was used.',
     ]);
   });
@@ -307,7 +307,7 @@ describe('plugin results: undeclared argument names', () => {
     const lines = blocks(env)[0].split('\n');
     assert.equal(lines.length, 3);
     assert.equal(lines[1], '- Fact: pattern and regex are not fields of excel_diag_search and were ignored, so this result is not narrowed by them. Send the call again with the allowed fields if they mattered.');
-    assert.equal(lines[2], `- Fact: bundle "sample" was read as ${SAMPLE_ID}.`);
+    assert.equal(lines[2], `- Fact: bundle "sample" was read as "${SAMPLE_ID}".`);
     assert.deepEqual(env.details.ignoredFields, ['pattern', 'regex']);
   });
 

@@ -39,7 +39,7 @@ const MANIFEST = {
   id: 'excel-diagnostics',
   name: 'Excel Diagnostics',
   description: 'Read-only search of Excel diagnostics log bundles kept in a folder on the host.',
-  version: '1.0.0',
+  version: '1.0.1',
   configSchema: {
     type: 'object',
     additionalProperties: false,
@@ -63,7 +63,7 @@ describe('plugin registration: manifest and entry', () => {
   it('package.json points the host at index.js and asks for nothing to be installed', async () => {
     const pkg = await readJson('package.json');
     assert.equal(pkg.name, 'openclaw-plugin-excel-diagnostics');
-    assert.equal(pkg.version, '1.0.0');
+    assert.equal(pkg.version, '1.0.1');
     assert.equal(pkg.type, 'module');
     assert.equal(pkg.private, true);
     assert.ok(typeof pkg.description === 'string' && pkg.description.length > 0 && !pkg.description.includes('\n'));
