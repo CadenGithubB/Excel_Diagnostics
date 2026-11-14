@@ -1,275 +1,191 @@
 # Excel diagnostics
 
-Four pieces for chasing Microsoft Excel slowdowns, hangs and crashes on macOS:
+Tools for looking into Microsoft Excel slowdowns, hangs and crashes on macOS.
 
-- **`excel_diagnostics.sh`** collects the evidence on the affected Mac and zips it. Run `sudo bash excel_diagnostics.sh`; it asks what to do. `bash excel_diagnostics.sh --help` lists the modes and options.
-- **`index.html`** is a viewer for those bundles. It is a single static page, served by GitHub Pages, that searches and filters a bundle inside the browser.
-- **`excel_diagnostics_cli.mjs`** searches a bundle from a terminal with the same engine as the page, for working without a browser or for handing the job to an agent.
-- **`openclaw/`** is a plugin and skill for an OpenClaw agent: ten read-only `excel_diag_*` tools over the same engine, with a short skill that tells the agent when and how to use them.
+- **`excel_diagnostics.sh`** collects logs and reports on the affected Mac into a zipped bundle.
+- **[The viewer](https://cadengithubb.github.io/Excel_Diagnostics/)** (`index.html`) reads a bundle in your browser. Nothing is uploaded.
+- **`excel_diagnostics_cli.mjs`** searches a bundle from a terminal, with the viewer's engine.
+- **`openclaw/`** lets an OpenClaw agent search a bundle.
 
-## What a bundle holds, and hiding names
+The tools show what was recorded. They do not say what caused a problem.
 
-A bundle can name the Mac and the person using it: the account name and full name, the computer name, the serial number and hardware UUID, email addresses, network addresses, and the names of files and folders. Know that before sending one to anyone.
+## Quick start
 
-When collecting after the fact or capturing a reproduction, the script also asks what happened, in a few words. Pressing Return records nothing. What is typed is kept in `case/incident_context.md` under a heading that says it is what was typed, and the viewer shows that file first among the documents on its Overview tab. It is kept as one line of at most 500 characters: each run of line breaks, tabs, plain spaces and no-break spaces becomes one space, control characters become a space or are left out, and complete key codes and the characters on a fixed list in the collector (those that reorder text, and a few that draw nothing) are taken out. Other characters that draw nothing stay where they are, because some languages use them inside words; a text made only of such characters and spaces is kept as no text at all. A longer text keeps only its beginning, which the file then says. At the question, a pasted paragraph is taken whole, Backspace, Ctrl-W and Ctrl-U take text back, and the arrow keys do nothing. The frozen-Excel and monitoring modes do not ask; `--note "Excel closed when I sorted column C"` gives the line in any mode. `--case`, the option's old name, takes text in the same way. The script checks the line against nothing. With `--redact` it is treated like any other text: the names listed below are replaced in it, and whatever else was typed stays. The line is also part of the command line when it is given with `--note`, and when the script, started without `sudo`, runs itself again with it; macOS records a `sudo` command line in its own log, which a bundle can include.
+1. Get the collector from the viewer ("Download the script"), a [release](https://github.com/CadenGithubB/Excel_Diagnostics/releases), or:
 
-Every question the script asks is read by a small program of its own, not by the shell's line editor. Ctrl-C, Ctrl-\ and Ctrl-Z typed by themselves do what they do anywhere else, after the terminal has been put back; where nothing could start the script again after Ctrl-Z (a run in a terminal of its own, with no shell to type `fg` in), the question goes on. Inside a paste the terminal marks, or with more input arriving straight behind them, those three keys and Ctrl-D are not acted on: at the workbook question they are kept as part of the path, and at every other question they are dropped like any other control character. On a terminal that does not mark a paste, one of them that a paste holds is still acted on when the paste pauses for more than a tenth of a second straight after it.
+   ```bash
+   curl -O https://cadengithubb.github.io/Excel_Diagnostics/excel_diagnostics.sh
+   ```
 
-A paste whose end the terminal never marks is over once a second passes with nothing arriving. At every question at which the terminal marked no paste, what arrives after the Return (or the Ctrl-D) that ends the answer is dropped until half a second passes with nothing, however long that takes, and the script says so on the screen, naming the key that ended the answer; when a note is kept from the question about what happened, `case/incident_context.md` says so too (or, in the run with `sudo`, that the run was started with the option that hands this on: see below). So each answer takes half a second after Return, and what is typed ahead in that time is dropped. Pieces of a paste that arrive more than half a second apart are not caught this way.
+2. Run it in Terminal. With no options, it asks what to do.
 
-The program that reads a question keeps at most 8,000 bytes of what arrives there; what does not fit is dropped, and the terminal's bell rings once when the limit is reached. When that happens at the question about what happened and a note is kept, the file says that more than 8,000 bytes arrived there, that what did not fit was not kept, and that the text may have been edited after that; it says none of this when the whole text was taken back after the limit was last reached. The script, started without `sudo`, hands what it found out about the note to its run with `sudo` as options: `--note-cut` (the line was cut at 500 characters), `--note-over` (more than 8,000 bytes arrived), `--note-late` (input after the Return was dropped) and `--note-plain` (perl could not be run or failed, so only plain ASCII was kept). Anyone who starts the script can give them, so a run that is given one does not say that what it stands for happened: `case/incident_context.md` says that the run was started with that option, and what the option hands on. What a run found out for itself is said as a fact. At the workbook question the bytes are kept as they arrive, tabs, line breaks, carriage returns, Ctrl-S, Ctrl-Q, control characters and bytes that are not UTF-8 text among them, except codes that start with Esc (what arrow and function keys send), NUL bytes, and the keys that end, edit or interrupt an answer where they are taken as keys and not as part of a paste; each control character, and each byte that is not part of a UTF-8 character, is shown on the screen as one `?`. Then backslash escapes are taken off (a backslash and the character after it become that character, a backslash before a line break goes with it, and a backslash with nothing after it stays), and so are white space and straight quote marks at the two ends, as for the path Terminal writes for a dragged file. A path that is then longer than 1,024 bytes is not used, and the question is asked again. In `case/incident_context.md` the workbook path is written with each control character, line or paragraph separator and character from the same fixed list shown as one space; if perl cannot be run, only the plain control characters are, and the file says so. The question about what happened reads what arrives as UTF-8, whatever the locale (`LC_ALL`, `LC_CTYPE` or `LANG`, in that order): a run of bytes that makes a whole UTF-8 character is kept as that character, and every other byte that is not plain ASCII is dropped. Where the locale does not name UTF-8, each character kept that is not plain ASCII is shown on the screen as one `?`. So text in another encoding (EUC, Big5, Shift JIS, GBK and the like) is mostly dropped there, and where some of its bytes happen to make a UTF-8 character, that character is kept, though nobody typed it. A `--note` given on the command line is read as UTF-8 too, and there each byte that is not part of a UTF-8 character becomes a space. Where the locale does not name UTF-8 and the note that is kept holds a character beyond ASCII, `case/incident_context.md` says that such characters were read as UTF-8 and may not be the characters that were typed. At the workbook question, where the bytes are kept as said above, a run of bytes that makes a UTF-8 character is shown on the screen as that character where the locale names UTF-8 and as one `?` where it does not, and each other byte that is not plain ASCII as one `?`. The script itself handles answers and options as bytes, whatever the locale, so each is handed to the run with `sudo` as the one argument it was. If the program that reads a question is stopped by a signal, the script puts the terminal's settings back and switches paste marking off before it stops too. A number typed at a question, or given with `--days`, `--max-wait`, `--interval` or `--hours` or by Jamf, is read without its leading zeros (`08` is 8) and may have at most four digits after them, each one of 0 to 9 (a digit of another script is not taken); anything else is turned down. A date given with `--since` or `--until` must be written exactly as YYYY-MM-DD and be a day that exists, from 1900-01-01 on (the `date` command on a Mac takes no earlier year). Days are counted as calendar days, also across a change of the clocks. With `--until` and no `--since`, the days are counted back from `--until`, and the question about how many days says so. The line that says how many days are searched is written once the days are worked out from `--days`, `--since` and `--until`.
+   ```bash
+   sudo bash excel_diagnostics.sh
+   ```
 
-A bundle made by a collector before 1.5.0 can hold a sentence about a PivotTable crash that nobody typed: those versions asked "Is this the crash when filtering a PivotTable?" and took Return as yes. The viewer marks such a file as coming from an older collector.
+3. Find the results on the Desktop: a folder `Excel_Diagnostics_<mode>_<date>_<time>`, its `.zip`, and a `.zip.sha256` checksum. To check the zip, run this in its folder:
 
-`--redact`, or answering yes when the script asks, replaces these in every plain-text file of the bundle, crash reports and JSON logs included:
+   ```bash
+   shasum -a 256 -c Excel_Diagnostics_collect_20261114_091500.zip.sha256
+   ```
 
-- the account name, and the name of any home folder under `/Users`
-- the full name, in either order and joined by a space, a dot or other punctuation (`Pat Lee`, `Lee, Pat`, `pat.lee`), with or without its accents
-- the computer name and host names
-- the serial number, the hardware UUID and provisioning UDID, and the two per-Mac keys that crash reports carry
-- email addresses, and the user part of a share or URL (`smb://name@server/` keeps the server)
+4. Drop the zip on the [viewer](https://cadengithubb.github.io/Excel_Diagnostics/).
 
-An address is replaced from where its run of the characters an address can hold (letters, digits, `.`, `_`, `%`, `+` and `-`, so `%XX` escapes too) starts, or from the end of an escape such as `\n` or `\u2019` that starts that run, so an address with a long first part, or one written with `%40` for the `@`, goes whole; the time this takes grows with the length of the text, not with its square.
+## Modes
 
-The step has a time limit of an hour. When it is reached the step ends there and is said to have failed: some files may have been rewritten by then and others not, and `redaction.txt` may not have been written.
+Name the mode on the command line, for example `sudo bash excel_diagnostics.sh hang`.
 
-Files whose own names hold one of them are renamed; when several would get the same name they are numbered, and each number is looked at before it is given. A name is not made longer when a path in the bundle would then be longer than 1,000 bytes, the most the copy lets a path have (the zip step cannot take much longer ones): it is left as it is and listed as a problem, so the result is not complete. An entry that the check cannot look at (a path too long, say) is listed as not checked. The script then reads the bundle again and writes `redaction.txt`, which has near its top a line, starting `Result:`, that says whether the result is complete, and goes on to what was replaced, what was left as it is, each file that was left out, and what the check found. Extended attributes stay out of the zip, and the checksum file beside it holds the zip's name without its path. If the step failed, if the check found one of them again, or if something in the bundle could not be read or rewritten, the last line on screen says so and the script ends with status 3 (or 1, when no zip could be made: see the order of the exit statuses below). A name left alone on purpose (see below) ends with status 0, and the last line says that a name was left. A Jamf policy asks for hiding with parameter 7 set to `redact`.
+| Mode | What it does | Use it |
+| --- | --- | --- |
+| `collect` (default) | Copies Excel's logs, diagnostic reports, recent days of the unified log, system and memory state, add-ins and preferences. | After a crash or slowdown. |
+| `hang` | Takes a spindump, footprint and open-file list of Excel, says when Excel can be force-quit, then copies Excel's logs and the last 30 minutes of the unified log. | While Excel is frozen. |
+| `repro` | Starts a live log stream and a memory timeline. Press Ctrl-C 30 seconds after the problem happens; it then gathers what `collect` does. | When you can make the problem happen. |
+| `watch` | Writes Excel's memory and CPU, and the system's memory pressure, to a CSV until Ctrl-C or `--hours`. | To follow memory over hours. |
 
-What it does not do:
+`hang` copies no diagnostic reports, Office logs or system state. `repro`'s live stream is unfiltered: every process's entries, debug level included, up to 10 GB.
 
-- **File and folder names stay.** Document names sit inside log messages with nothing to mark where they start and end, so they cannot be removed reliably. Neither can company or cloud account names in folder names.
-- **Files that are not plain text are left out**, because they cannot be rewritten or checked: OneDrive's own logs (which the viewer cannot search anyway), memory dumps, text in UTF-16, and property lists that hold encoded data. A binary property list is turned into text first, with at most 5 seconds and 16 MB of text for each one (120 seconds and 256 MB for all of them); one that is not is left out too, and `redaction.txt` says which of these it was: the time, the size, a file that only starts like a binary property list and that `plutil` could not read as one, the console user's rights, which could not be taken on in that run or which the run had stopped using (each said as which it was), or `plutil` ending without an answer. When nothing is left out, `redaction.txt` says how many binary property lists were turned into text. A text copy that cannot be written (a full disk) stops the step as a rewritten copy that cannot be written does: nothing is left out or deleted, and the bundle is not taken as having names hidden. `redaction.txt` lists each file left out. Collect again without `--redact` to have them; they cannot be got back from a run that hid names.
-- **Some names are left alone on purpose, and the result line says when.** An account name that only says what kind of account it is (`admin`, `user`, `guest`) is replaced only as a folder name in a path, and a computer named after its model ("MacBook Pro") is left as it is, because those words run all through ordinary logs.
-- **A short account name takes ordinary words with it.** A name of three to five letters is replaced wherever it stands as a word of its own, so an account called `max` or `will` also loses every other use of that word. `redaction.txt` says so when it applies.
-- **A note longer than 500 characters is cut before names are hidden.** The cut backs up to a space where one is near, so an account name or an address on it goes whole; of a full name on it, the first part can stay.
-- **A name in a form the script cannot predict stays**: a nickname, initials, a first name or family name on its own, a middle initial put in, or the parts of the full name run together in another order or into fewer than six letters.
-- **Other people's names stay**, except the names of their home folders under `/Users`, and of those only up to a plain space (a home folder named `Pat Lee` keeps the word Lee). So do the names of other computers, servers and printers.
-- **An address with a file ending straight after it stays** (`name@example.com.txt`), because that shape is nearly always a file name such as `Budget@2026.xlsx` or `icon@2x.png`.
-- **Text held in another encoding inside a file stays**: UTF-16 or base64 inside an otherwise plain-text file is not read.
-- **Network addresses stay**, and so does anything inside an `--archive` .logarchive, which cannot be rewritten. With one in the bundle the result is reported as not complete.
+## Options
 
-The collector runs as root on a Mac whose user decides what is in their own home folder, so it trusts nothing there:
-
-- **Excel is the console user's process that runs Excel's program file.** A process counts as Excel only when it belongs to the console user and the program file it runs, as `lsof` gives it, is `/Applications/Microsoft Excel.app/Contents/MacOS/Microsoft Excel`. Its name and its arguments are whatever whoever started it chose, so neither is taken for that. When more than one does, the one with the lowest process ID is the one looked at, and the one `watch` follows. This is asked again right before the script runs `spindump`, `sample`, `footprint` or `lsof` on it; when the answer has changed, that program is not run and the log says so. What the bundle says of Excel names that path and the process ID, and an Excel installed somewhere else is not looked for. `watch` says which process IDs it saw at a sample and at the last one before at which that was answered, not what became of a process. `office/versions.txt` lists such processes by their process ID only, and the arguments of the one that is looked at are cut at 4 KB.
-- **What the user can make large is cut before it reaches the working folder, and the bundle says where.** The Excel preferences are written out by `plutil` with the user's rights, for at most 10 seconds (it is given the path, never a file root opened, since root would follow a link put there), and the lines kept are cut at 1 MB, which `office/office_prefs.txt` says. The value of the switch for verbose logging is read with the user's rights for at most 10 seconds (a few KB of the file can make `plutil` take any amount of memory and time) and is cut at 4 KB before it is looked at; a read stopped there is said, in `collection.log`, in the status table and where the bundle says whether that logging is on. The live log stream of `repro` is cut once 10 GB of it has arrived, before it is labelled, and the `repro` row says so. Each unified-log search (one day of `collect`, or the half hour of `hang`) is cut once 2 GB of it has arrived, since any process can log messages that the search takes; `unified_logs/collection_status.txt` and the status table say which were cut. The rows written from what was kept can come to up to three times its size: each control or invisible character in a message is written as its number, and one of two bytes then takes six (`\u0085`). `summary.md` lists at most 200 restarts.
-- **Text the user can choose is written the way the workbook path is.** In the facts `reports/crash_summary.txt` takes from each report, in Excel's arguments, in the process names `top` prints, and in what `mdls` says of the workbook, each control character, line or paragraph separator and character on a fixed list is shown as a space: those that mark, embed, override or isolate the direction of text, and soft hyphen, zero-width space, word joiner, byte-order mark, tag characters and a few more that draw nothing (the list is `SHOWN_RULE_PL` in the collector). Other characters that draw nothing, such as joiners, fillers and the characters that choose a form, are left as they are. In the unified-log `.tsv` files each such character left in a row is written as `\u` and its number; tabs and line breaks inside a field were already written as `\t` and `\n`.
-- **The line that gives the previous shutdown cause is taken from the kernel only.** The log search, the `restart` tag and the list in `summary.md` take that line only from the kernel (process ID 0, whose program is `/kernel`), and so does the viewer for bundles made without `jq`: any process can log the same words. So are the kernel's memory messages (the `memory` tag), and the entries of `spindump`, `ReportCrash` and `osanalyticshelper` are taken only from their program files at `/usr/sbin/spindump` and in `/System/Library/CoreServices`: any process can be named like them. Microsoft's error reporting and update programs, and `tccd`, are taken by the name of their program file, and `summary.md` says so. `summary.md` lists such lines as they were logged, with nothing about what a value stands for, and when there are none it says whether any day of the log was searched.
-- **A program root runs with a time limit gets a process group of its own.** At its limit, and when the script is interrupted, it is stopped with everything in its group; when it ends, whatever it left in its group is stopped too. Its descriptors from 3 up are closed. The groups are written down in the working folder, and the interrupt handling stops any that are still there before it packages the results. The watch that runs beside `repro` is stopped the same way, with the wait it was in, and writes its row when it is stopped; so does `watch` stopped with Ctrl-C. The live log stream of `repro` runs in a process group of its own, which the terminal's Ctrl-C does not reach: `log stream` ends on Ctrl-C, and the Ctrl-C that ends the reproduction would otherwise end it before the script stops it. The script stops it itself, and the interrupt handling, which is done once however many signals come, waits for the stream and the watch to end before it packages the results.
-- **Two jobs root did once for each of something the user can multiply are done by one program.** The facts of every report are read by one program, and the files a folder's copy leaves out for its size (one file can be given as many more names as the user likes, each counted at its full size) are removed by one program.
-- **The workbook's facts are those of the file the path leads to** (`stat -L`), and when the path is a symbolic link the file says where the link leads, shown as the path is. When `stat`, `mdls`, or the look at the link does not answer, the file says so in fixed words with its status; their own messages, which name the path, are not kept. The dates and size come from `stat` and the Spotlight facts from `mdls`, each of which looks the path up by itself, and the file says so. When `test -f` finds no plain file at the path (nothing is there, it is a folder, or a folder on the way cannot be searched: which one is not known), the file says that, and does not call the workbook missing.
-- **It reads the home folder with the user's rights, not root's.** A link put where a log folder is expected can then lead only to what that user could already read. If the script cannot take on those rights, it reads nothing in the home folder and says so. The check of them is a helper run with them that must answer with that user's account id, within 10 seconds; when it gives no answer (stopped at that limit, or ended by a signal), nothing in the home folder is read either, and that is said as what it was, not as rights that could not be taken on. Each such read has a time limit, because a helper that runs as the user can be stopped by that user. What a helper writes reaches root through pipes of the program that runs it, which passes it on: a helper that is not ended by its kill (one held by a volume that no longer answers, say) holds neither that program nor what reads the helper's output more than a few seconds past its limit. A read that hits the limit is named in `collection.log`, the status table has a `time_limit` row that says one was stopped, and from then on nothing more is read with that user's rights in that run: the number of helpers is the user's to choose, one per file they put in the folders the collector reads. The time spent on all of them together is limited too, to 30 minutes, so that helpers held just short of their own limits cannot hold the run either. That time is written down in the working folder after each helper; when it could not be (a full disk), the 30 minutes are taken as used up, and the run holds to that in its own memory even when the mark it leaves in the working folder cannot be made either. Once reading with the user's rights has stopped, the bundle says of each source in the home folder that it was not looked at, not that it is missing, and calls the steps that read the home folder incomplete. The workbook's own reads are the one exception: as root each of them has 10 seconds, one that is stopped there stops no other read, and the file about the workbook says which of its facts were not read (run without root, its reads have 20 seconds together). A read that ends some other way (its program killed, say) is said to have ended without an answer, and reading goes on; the step it was part of is then called incomplete in the status table, and a list it was making says where it stops. That holds for each program of a list or a count too: the list of a folder is made by `find` and a small program that looks at each name it gives, the test of whether a report names Excel is a program of its own for each report, and the counts of a folder before it is copied each carry a name and are all needed; one of them that is killed is said, and never taken for an answer or for another count. Whether Excel's verbose logging is on, when that is not answered, is said, and the Documents folder is then not searched. What the search for other Microsoft log files found, and the list of each report folder, are gone through no further than their first 100,000 files, and no further file is taken from one once 15 minutes have passed on it (a file already being read then keeps its own time limit); the status table then says how many were not gone through. Once reading with the user's rights has stopped, the files found in the home folder are listed or counted as not read, and nothing more is tried for them.
-- **Outside the home folder it takes a file only when the file is opened as itself.** Root is not the only one who may write to the system's report folder (every administrator can) or to Microsoft's system log folders. A link there, a file reached through a linked folder, and a second name given to a file from somewhere else are not read.
-- **It builds the bundle in a folder only it can write to**, under `/private/var/tmp`, and moves the finished folder, zip and checksum to the Desktop at the end, as the user. `--outdir DIR` names another folder; so does `EXCEL_DIAG_OUTDIR` when `--outdir` is not given. A variable set before `sudo` reaches the script only when `sudo` is set up to pass it on, so with `sudo` give `--outdir`; started without `sudo`, the script hands `EXCEL_DIAG_OUTDIR` to its own run with `sudo` as `--outdir`. If something is already there under one of those names, a link included, nothing is moved or written through: the results stay in the working folder, the last lines say where, and the script ends with status 4. The same happens when a step of the hand-over does not finish within its time limit, or its steps together take more than an hour: the hand-over stops there. It also stops at the first of the three that does not move, and the last lines say which were moved and which were not, from what each move answered: a move counts when `mv` ended with 0 and a look by the same hand then finds nothing left under that name in the working folder. Root does not look there itself once the folder is the user's. Once the working folder is the user's, root writes nothing more into it. With a destination that only root can write to, root moves them itself and they stay root's. The programs the script runs keep their temporary files (`sort`'s, for a long list) in a folder of the working folder's, beside the bundle and closed to others, not in `/var/tmp`, where anyone can write; that folder is removed before the hand-over.
-- **Each step's row in the status table comes from what that step counted.** A step is called complete only when every program it ran answered, every list, search or count that `find` made got through all it was given, every file it found that was there could be read whole, and everything it had could be written into the working folder; otherwise the row says incomplete, and why. `find` ends with status 1 when it meets an error on the way (a folder it cannot read, an entry gone before it was looked at), and a list it made then says so where it ends. A file that was not copied is said to be not there, not a plain file, not in its folder under that name only, refused, not all read, over a size, not read because reading with the user's rights had stopped, read by a program that ended without an answer, or not written into the working folder, whichever it was. A day of the unified log is `ok` in `unified_logs/collection_status.txt` only when `log show`, the labeller and the writing of its rows all ended well; a labeller that stopped reading before the end is said as that, not as a write that failed; the labeller's messages go into the day's errors file, which is named only when it was kept, and the row counts the days by what came of them. The reproduction's row says how its live log stream ended, or that it was not started, and names its file only when the bundle holds one. The hang's row says that no process of the console user's ran Excel only when `lsof` was asked and answered.
-- **A write into the working folder that fails is said.** What a program run with the user's rights, or a search, gives is written by a program that reads on when it cannot write (and `sort`, which stops reading when it cannot write its temporary files, is followed by a read to the end), so the program that gave it is never stopped by a pipe that closed and never blamed for the failure. A search or a report folder's list that could not all be written says how many of what it found are not in it for that reason, apart from those left by its limits; when even how many it found could not be written, it says that this is not known. A watch that cannot write a line of its timeline, or a snapshot, says so at the first one, and its row says how many. The last lines on the screen say how many rows of the status table, and how many times anything else, could not be written. The checksum file is named only when it was written whole.
-- **It keeps plain files only.** Links, pipes and devices in a copied folder are dropped, and no copied file keeps special rights. A file that cannot be read costs that file, not the rest of its folder.
-- **A file with a control or invisible character in its name or path is left out and counted**, in the log and in the status table. That is a control character (a line break, a tab, and the 8-bit ones from U+0080 to U+009F), a line or paragraph separator, a character that sets the direction of text (an embedding, override or isolate, and the three direction marks), and the zero-width and other characters that draw nothing which the workbook path in `case/incident_context.md` shows as a space; the list is in the collector, as `ODD_GLOBS`. In every list the collector writes, one name is one line, and no name can show as another or reorder what follows it.
-- **It works on bytes.** Every program it runs to collect works in the C locale, as under Jamf, whatever the locale of whoever runs it: in some locales `sort`, `sed` and `tr` stop at a byte that is no character there, without a word. So in `reports/report_listing.txt` each byte of a name that is not plain ASCII is shown as `?`. Nor do they take the settings a person may have made for their own `grep`, `gzip` and `perl` (`GREP_OPTIONS`, `GZIP`, `PERL5OPT`, `PERL5LIB` and the like), and `jq` is given no home folder, from which it would load definitions. The questions are still asked, and shown, in the person's own locale.
-- **The console user's home folder is the one the account database gives**, network accounts included. When it gives none, or no folder is there, the folder named after the account in `/Users` is used instead, and the script says so on the screen.
-- **A disk too full to read its own programs stops the run.** bash writes each program the script holds into a temporary file in `/var/tmp` before reading it. When one cannot be read whole, the script stops before anything is collected, says which, and ends with status 1. The answers to its questions are worked out without such a file.
-- **A file name is never read as an option or as code**, whatever it starts with.
-- **A log folder is copied up to a size.** A file over 1 GB is left out, and so are the largest files of a folder whose copy comes to more than 4 GB. A file can claim any length without holding it, and the zip step would read all of it. What was left out is counted in the log and the status table.
-
-What the bundle says is what was recorded and what the script did, never what something means or why it happened:
-
-- **Each list says by what test it was made.** `office/autorecover_inventory.txt` says by what names it takes files, and its list of large files that it takes files over 10 MB of any name; `office/addins.txt` that it takes each entry of a folder, at most three levels down; `office/office_prefs.txt` names the words its lines of the preferences are picked by, from the same list `grep` is given; `reports/crash_summary.txt` counts the reports by name with the date taken off. None of them says what a file or a kind of report stands for.
-- **The reports are copied by one rule, and that rule is what `collection.log` and `source_catalog.tsv` give.** From each report folder (the system's, the user's, and the `Retired` folder of each), these are taken for copying: every plain file changed since the start of the first incident date, and of the files changed in the last 30 days (or in as many days as are searched, when that is more) also each whose name holds excel, office or microsoft, starts with jetsam or WindowServer, or ends in .hang, .spin or .panic, and each other whose text holds "Microsoft Excel". A name that starts with a dot is passed over. What was taken and not copied (past a limit of the step's, not readable, or with a control or invisible character in its name), and why, is in the status table and `collection.log`. The log and the catalog give it with the times that were used, and no report is said to be related to Excel. The sleep and wake history and the Microsoft install history are taken from the day that many days back on.
-- **`summary.md` names only files that are in its bundle**, each with what it holds, under the name this run gave it (a `.ndjson` file where there was no `jq`), so a hang or watch bundle does not point at files only `collect` makes. It points at a row of the status table only when the row is there, and says for how many of the days whose search was started `unified_logs/collection_status.txt` has a line. A run that is stopped during a search writes what that search would have written when it ended, as a search the run was stopped in: the day's line in `unified_logs/collection_status.txt`, or hang's `unified_last30m` row; and `repro` stopped after its stream has ended writes its row, saying that it was stopped before its end.
-- **A frozen Excel can be force-quit as soon as nothing more is asked of its process.** Hang mode says so right after the spindump (or `sample`), the footprint and the list of open files, before it copies Excel's logs and searches the unified log, and promises no time. When no process of the console user's runs Excel's program file, or whether one does is not known, it says that none of those three is made, and then that nothing is asked of any Excel process in the run and Excel can be force-quit. Repro mode asks for the reproduction only once its live log stream has been started, after a first snapshot.
-- **A unified-log day searched to its end with nothing found** says only that `log show`, the labeller and the writing of the rows ended with 0 and that the file holds no entry; it gives no reason. When the access check before the search (`log show` of the last minute) ends with an error, no day is searched, and `unified_logs/collection_status.txt` and the status table say that, with its status, not why.
-
-The script says where its working folder is when it starts. A run that is cut off before the end, by the Mac going down for one, leaves what it had collected there: a restart does not empty `/private/var/tmp`, and the next run names up to five folders there that are named like its working folders, with who owns each and when it last changed, and says how many there are in all. Only a folder of the account that runs the script is looked into, for something named like a bundle; one of the console user's is not. The look for such folders is stopped after 30 seconds, and then the run says so. It says nothing about what such a folder is, because anyone can make one of that name. After a run with `sudo` only an administrator can open it.
-
-While it is collecting, Ctrl-C or Ctrl-\, closing the Terminal window, or a TERM signal, stops the run and packages what there is. Once the script starts on names and packaging, all four are ignored until it has finished, so that an interrupt cannot leave a folder that looks finished and is only half rewritten. On a large bundle the step takes minutes and says every so often how far it has got; it is stopped after an hour (see hiding names above).
-
-The script ends with status 0 when a zip was made and is where it was asked for, 1 when no zip could be made, 3 when a zip was made but the `--redact` step failed or did not end complete (see hiding names above), 4 when the results could not all be moved to where they were asked for (some of them may have been: the last lines say which, from what each move answered, and do not start with "Done"), and 130 when it was stopped. When more than one applies, it ends with the first of them in this order: 1, 3, 4, 130. The last lines say of each piece that it was moved, or where it was before the hand-over began, from what each move answered; they do not say where it is now, because by then the folder it is in is the console user's, and that user can move it.
-
-## Using the viewer
-
-Open the page, then drop an `Excel_Diagnostics_….zip` on it. The unzipped folder or individual log files work too, and "Try it with sample data" loads a made-up bundle.
-
-Prefer a terminal? File → Get the command-line tool (or "Download the tool" on the start page) hands out `excel_diagnostics_cli.mjs`, described below.
-
-No bundle yet? The page hands out the collector as well: "Download the script" on the start page, or File → Get the collector script once a bundle is open. "View it" shows the script and how to run it. The copy is built into the page, so it works offline and matches this repository as of the last build.
-
-**Nothing is uploaded.** The page has no server side. Its Content-Security-Policy sets `connect-src 'none'`, so the browser itself refuses any network request the page might make. You can save `index.html` and open it from disk with no connection.
-
-### Timeline
-
-Every timestamped source is merged into one list, sorted by time:
-
-| Source | Files |
+| Option | What it does |
 | --- | --- |
-| macOS unified log | `unified_logs/*.tsv`, `unified_last30m.tsv`, `repro/unified_live_unfiltered.tsv` (and the `.ndjson` variants written when `jq` is missing) |
-| Excel's own diagnostics | `…/excel_container_logs/Diagnostics/EXCEL/*.log` (and other Office apps' logs in the same format) |
-| Microsoft AutoUpdate | `office/autoupdate.log` |
-| OneDrive | the text `OneDrive-*.log` files |
-| Install history, sleep and wake | `system/install_history_microsoft.txt`, `system/sleep_wake.txt` |
-| Crash and hang reports | one entry per `.ips`, `.crash`, `.diag`, `.hang`, `.spin` or `.panic` file, and one per `ForceQuitDate` in the text written out from a CrashReporter file |
-| Anything else | any `.log` or `.txt` whose lines start with a timestamp |
+| `--days N` | Days of unified log to search (`collect`; default 3). |
+| `--since`, `--until` | First and last incident date, as YYYY-MM-DD. |
+| `--max-wait M` | Most minutes per log search (default 3; 0 = no limit). |
+| `--note TEXT` | What happened, kept as one line in `case/incident_context.md`. |
+| `--workbook PATH` | Records the workbook's size and dates. Never copies it. |
+| `--redact` | Hides the user's and this Mac's names and IDs, and email addresses. See below. |
+| `--archive` | Adds an unfiltered `.logarchive` (`collect`). Can be very large. |
+| `--outdir DIR` | Where the results go (default: the console user's Desktop). |
+| `--no-sudo` | Does not re-run itself with sudo, so collects only what this account can read. `manifest.tsv` says what was skipped. |
+| `--no-prompt` | Asks no questions. |
 
-Sources disagree about clocks: Excel and OneDrive log in UTC, AutoUpdate in local time without saying so, the unified log in local time with an offset. The viewer converts everything to UTC and displays it in the time zone of the Mac the bundle was collected on (the "logged Mac"), which it learns from the offsets in the unified log. A switch in the header changes the display to UTC or to your own zone, and shows the offset each choice means. If the logs record no zone, that first choice is unavailable and times start in your own zone.
+`bash excel_diagnostics.sh --help` also explains `--interval` and `--hours`.
 
-They disagree about names too: Excel's own log calls the process `EXCEL`, macOS calls it `Microsoft Excel`. The viewer shows both as `Microsoft Excel`, so one process filter covers both logs; the Source column still says which log an entry came from.
+**Jamf Pro.** Run it as a policy script. Nobody can press Ctrl-C there, so `watch` stops only when parameter 5 gives hours, and `repro` runs until something stops it.
 
-What you can do:
+| Parameter | Value |
+| --- | --- |
+| 4 | Mode |
+| 5 | Days (`collect`) or hours (`watch`) |
+| 6 | Max wait, in minutes |
+| 7 | `redact` to hide names |
 
-- **Search** with words, `"exact phrases"`, `/regular expressions/`, and `-exclusions`. `process:`, `level:`, `pid:`, `subsystem:`, `category:`, `tag:` and `source:` match one field. A search that looks like a slip gets a line under the search box saying how it was read: a misspelt field name, a value that names nothing in this bundle, a quotation mark that is never closed. When nothing matches, the page counts again with one condition taken away at a time and says what each would give, with a button to take it away: the time window, the filters, Match case, and each search term when there are two to six of them (otherwise the search text as a whole). On a bundle over 400 MB it does not run a text search again without the window or the filters, since that would read every log once more, and says so.
-- **Filter** by severity, source, tag, process, subsystem, category and file from the list on the left. The count beside each value is what you would get by choosing it. Under each severity are the levels the logs themselves use (macOS: Default, Info, Debug, Error, Fault; Excel: Medium, Monitorable, Unexpected), so you can pick a whole severity or one level.
-- **Tags** say why an entry is worth a look. `excel`, `excel-helper`, `mentions-excel`, `microsoft`, `hang-report`, `memory`, `restart` and `logs-dropped` describe who logged it; `restart` is the kernel's line about why the Mac last shut down, and is never given to another process's line. `permissions` and `storage` describe what it says: sandbox and privacy (TCC) refusals, "not permitted", "denied" and missing entitlements; a full disk, an exceeded quota, I/O errors and a read-only volume. Those two are applied to every log in the bundle, Excel's own included, and look for refusals and failures, not the bare words.
-- **Zoom in time** by dragging across the chart (right-click it to zoom back out), typing a start and end, or using the ± buttons on a selected entry.
-- **Read the chart against what else the bundle records.** Above the bars are marks for each crash, hang or other report, the first entry from each Excel process, restarts and shutdowns, install activity and the moment of collection. Under them are thin lanes for the stretch the macOS log covers, the stretch Excel's own logs cover, and each sleep for as long as the sleep and wake history says it lasted. Any stretch the bundle has no macOS log for is hatched, so a day whose search was cut short is not mistaken for a quiet one, and a bundle collected without any macOS log is hatched from end to end. A day that was searched to its end counts as covered however little it holds. Hover for the details; the key under the chart names each mark.
-- **Step through errors** with `e` and `Shift+E`, **pin** entries with `p`, and press `c` to drop the filters while staying on the selected entry, so you can see what surrounded it.
-- **Work from the keyboard.** Tab reaches every filter value (its name shows only that value, the − beside it hides it), the file list and every link, and the arrow keys move through the entries.
-- **Export** the entries shown, or just the pinned ones, as a tab-separated file.
-- **Save a view** from the File menu: the search, filters, time window and pins go into a small `.view.json` file that holds no log text. Load it later, or hand it to a colleague who has the same bundle, to land on the same entries.
+## What a bundle holds
 
-The File menu also opens another zip, folder or the sample data, saves a copy of whichever bundle file is open under Files (handy for pulling one crash report out of a zip), and closes the bundle.
+Every bundle has:
 
-### Other tabs
+- `manifest.tsv`: the status table, one row per step, saying what was incomplete and why.
+- `collection.log`: what the script did, step by step.
+- `summary.md`: the status table, and what the main files hold.
+- `bundle_info.tsv`: collector version, mode, start and end times, macOS version, Mac model and Excel version.
+- `case/` (when a note or workbook is given): the note, the workbook path and its facts.
 
-- **Reports** lists the crash, hang, jetsam and other diagnostic reports in the bundle, and lays each one out as it was recorded: the facts in its header (process, version, exception, termination), the thread the report itself marks as crashed with its frames, or a hang's heaviest stack, and the images it lists. The same recorded words go on that report's timeline entry (the exception, and the first frames of a crashed thread or the innermost lines of a hang's stack), so a search for an exception type or one of those function names finds it. A report that is not a crash report is not said to have a crashed thread: the page calls it the thread the report names. The spindump or sample that the collector's hang mode takes is listed here too.
-- **Files** lists everything in the bundle and opens text, Markdown and TSV files, with a hex preview for binary ones.
-- **Overview** starts with what the bundle records about the Mac and the collection, each line with the file it was read from: macOS version, model, processor, memory, startup disk, uptime, Excel version, the collector's mode and version, and whether names were hidden. Below that are the collector's summary, the collection status and what each source covers.
-- **Memory** lays out what the bundle recorded about memory, as recorded and without interpretation:
-  - the collector's memory snapshots, with the processes using the most memory
-  - Excel's footprint by kind, from `footprint`
-  - JetsamEvent reports, which macOS writes when it ends processes to free memory
-  - when the entries tagged `memory` were logged: the kernel's memory messages (process ID 0, or the program `/kernel`), and the jetsam messages of `/System/Library/CoreServices/ReportCrash` and `osanalyticshelper`
-  - for watch and repro bundles, charts of Excel's footprint, CPU and threads and of system memory from `excel_memory_timeline.csv`, with Excel starts and stops and crash, hang and jetsam reports marked and periods of memory pressure shaded
+By mode:
 
-  Drag across a chart to open that span on the timeline, or click to jump to a moment. The list of events under the charts shows the first 200 and says how many more there are. Where marks of one kind crowd a chart, one is drawn for every few pixels, and the tooltip lists the first six and counts the rest.
+- `collect` and `repro`: `reports/`, `office/` (Microsoft logs and settings), `system/` and `source_catalog.tsv` (where each source was looked for).
+- `collect`: `unified_logs/`, one file per day, and how each day's search ended.
+- `repro`: `repro/`, with the first and last snapshots and the live log stream.
+- `hang`: `excel_spindump.txt` (or `excel_sample.txt` without root), `excel_footprint.txt`, `excel_open_files.txt`, Excel's logs and `unified_last30m.tsv`.
+- `watch` and `repro`: `excel_memory_timeline.csv`.
 
-### Large captures
+`reports/` holds every diagnostic report changed since the first incident day, from any app. From the last 30 days it also takes reports named for Excel, Office, Microsoft, jetsam or WindowServer, hang, spin and panic reports, and any report whose text names Microsoft Excel.
 
-Log text is never loaded into memory. The viewer keeps a compact index of each entry (time, byte range, level, process and so on, about 40 bytes) and reads the text from disk as you scroll or search. Measured in a Chromium browser on an M1 Pro MacBook Pro (16 GB) with a 1.5 GB unified-log file of 5.1 million entries: about 6 seconds to open, filters under half a second, and about 3 seconds for a text search across the whole file.
+**Times.** Excel's own logs are in UTC. The unified-log `.tsv` files have `local_time` and `utc_time` columns. Without `jq` (built into macOS 15 and later) they are `.ndjson` files instead; `log_format` in `bundle_info.tsv` says which.
 
-A zip cannot be searched in place, so its logs are unpacked first: small ones into memory, large ones into the browser's private storage for this page. That copy is deleted when you open another bundle or next open the page. The same 1.5 GB file took 16 seconds to open from a zip. How much fits depends on the storage the browser allows the site; the page tells you if a zip is too big for it. For a bundle over about 1 GB, unzip it and drop the folder instead: the browser then reads the logs where they are, with no copy.
+## Hiding names (`--redact`)
 
-A bundle from a collector older than the `permissions` and `storage` tags opens more slowly, because the viewer has to read every unified-log line for them: about twice as long for a file that size. Current bundles carry the tags in the `.tsv` files and say so in `manifest.tsv`.
+`--redact` rewrites every plain-text file in the bundle:
 
-macOS `ditto`, which the collector uses, does not write zip64. Past 4 GB it stores sizes and offsets that have wrapped around. The viewer detects and repairs that, and reads real zip64 archives too.
+- **Replaced:** the user's account name, full name and home folder name, this Mac's names, serial number and hardware IDs, and email addresses. File and folder names holding one of these are renamed.
+- **Left out:** files that are not plain text, such as OneDrive's own logs. Collect again without `--redact` to get them.
+- **Not hidden:** the rest of document and folder names, other people's names, the names of other computers, servers and printers, network addresses, nicknames and initials, and any `.logarchive`.
+- **Kept on purpose:** a generic account name such as `admin`, and a Mac named after its model; the last line says so even when the status is 0. A three-to-five-letter account name (such as `max`) is replaced wherever it stands as a word.
+- **Report:** `redaction.txt` says whether the result is complete, what was replaced and what was left out. With `--archive`, the result is never complete (status 3): a `.logarchive` cannot be rewritten.
 
-### What it does not read
+## Running as root
 
-- OneDrive's `.odl`, `.odlgz`, `.odlsent` and `.aodl` sync logs are in an obfuscated binary format. They are listed under Files only.
-- Apple `.logarchive` bundles (from `--archive`) need Console or `log show`.
+The user controls their home folder, so the collector trusts nothing there.
 
-It needs a current browser: Chrome or Edge 103, Safari 16.4, Firefox 113, or later.
+- It reads the home folder with the user's rights, under time limits (30 minutes in all). After one read times out, nothing more is read with those rights, except the workbook's own facts.
+- Outside the home folder, it takes a file only as itself: not through a link, a linked folder or a second name.
+- It builds the bundle in a root-only folder under `/private/var/tmp`. At the end it moves the results with the user's rights, unless only root can write to the destination. If a result name is already taken there, nothing is moved.
+- It caps what the user can make large. A copied log file over 1 GB is left out (over 250 MB for other Microsoft logs it finds), and so are a log folder's largest files past 4 GB. Each unified-log search is cut at 2 GB, and `repro`'s live stream at 10 GB.
+- A process counts as Excel only by its owner (the console user) and its program file, never by its name.
 
-### A bundle is someone else's file
+## Exit statuses
 
-The viewer, the command-line tool and the agent tools all treat every byte of a bundle as written by someone else:
+| Status | Meaning |
+| --- | --- |
+| 0 | The zip was made and is where it was asked for. |
+| 1 | No zip could be made. |
+| 2 | An option, its value or a Jamf parameter was not accepted. Nothing was collected. |
+| 3 | The zip was made, but `--redact` failed or is not complete. |
+| 4 | Some or all results stayed in the working folder. The last lines say which. |
+| 130 | Stopped by Ctrl-C, Ctrl-\, TERM or a hangup (the Terminal window closing) once collecting had begun. What was collected is still packaged. |
 
-- **A zip is the bundle only when it is given by itself**, or with nothing beside it but its checksum. A zip found among a bundle's files (one that was lying in a log folder the collector copied) is listed as a file and not opened. The folder, its zip and the zip's checksum can also be given together, or inside the folder that holds them: the folder is then the bundle, and a note says how many zip and checksum files that came with it were not opened. A bundle folder inside a folder that holds nothing else, or inside a zip's own top folder, is found the same way. Files that macOS and the Finder leave in folders and zips are set aside first and are not among the files shown: `.DS_Store`, `.localized`, a folder's `Icon` file, the `__MACOSX` folder and files whose names begin with `._`.
-- **In a collector's bundle the place decides what a file is.** The macOS log, the sleep and wake history and the install history are the files the collector wrote where it writes them. A file anywhere else that looks like one of them goes on the timeline as an ordinary log under its own name, and the Mac's time zone is not learned from it. The same holds for reports: `excel_spindump.txt` and `excel_sample.txt` are the collector's captures only at the top of the bundle, and a report is listed as a jetsam or panic report only under `reports/Library_Logs_DiagnosticReports` or `reports/Library_Logs_DiagnosticReports_Retired`, where the collector copies the system's own report folder. The Memory tab and the command-line tool's `memory` command read the collector's own memory files only.
-- **A link inside a bundle folder is never followed** by the command-line tool or the agent tools, and a zip is unpacked only into its own folder, up to a ceiling (two hundred times its packed size, at least 1 GB, at most 64 GB, and 200,000 files and folders; `EXCEL_DIAG_UNPACK_LIMIT_GB` sets another size). A zip that is all there is, inside another zip or alone in a folder with its checksum, is unpacked the same way, at most four zips deep, and the ceiling is one for everything a run unpacks. When a zip inside is over the ceiling, every folder of that chain in the unpack cache is deleted again, both the ones that run unpacked and any an earlier run left, so the next run on it starts from nothing. The agent tools answer a zip over the ceiling with "the bundle is too large to unpack": unzip it into the bundles folder, where a folder is read in place.
-- **Control characters in log text are shown, not sent**, when the command-line tool prints to a terminal: an escape character appears as `^[`.
-- **A name from the bundle stays on its line.** The command-line tool prints a file, folder, process, level or tag name with a line break in it as `\n`, a tab as `\t`, and a character that takes no room (one Unicode calls default-ignorable, such as a zero-width space, a direction mark, a variation selector, a byte order mark, a soft hyphen or a tag character, or an interlinear annotation mark) by its number, such as `<U+200B>`. It keeps only a variation selector right after a pictograph and a zero-width joiner between two pictographs, which make up an emoji. It leaves out a suggested command when the name it would need cannot be printed exactly as it is. In its listings the LEVEL column is cut at 24 characters and SOURCE and PROCESS at 34, each ending in `~` when cut; `show` gives the names whole.
-- **The agent tools quote what the bundle named.** A name, a path or a bundle id taken from the bundle is always given in quotation marks. A note about a search value that names nothing in the bundle does not list the bundle's own names; it gives the `excel_diag_count` call that does. In a suggested call and in the facts of a result, a name, a path or a bundle id from the bundle is written with each of the following as its escape: each character that would break a line or turn text round, each character Unicode calls default-ignorable (such as a zero-width character, a direction mark, a variation selector, a byte order mark, a soft hyphen or a tag character) and each interlinear annotation mark. Where a sentence quotes the name, path or id, each of those characters is shown by its number, such as `<U+200B>`. A search the command-line tool or the agent tools suggest for a name finds every name that contains it (for `level:`, every level whose name or severity starts with it), and the words beside it say so. `summary` gives `byTag` as a list of `{tag, entries}`, and the line of facts (as JSON) in one result, besides the tool name, the bundle id and the names of any arguments the tool does not have, is held to 24,000 characters as the model is handed it, escapes included: a result is cut further with a note when it would be longer, and a refusal that gives candidates gives as many whole ones as fit and says how many.
-- **One line that cannot be read does not stop a bundle opening.** It is left out of the timeline, and a note says how many such lines there were.
-- **The export is one row per entry and no cell is a formula.** A tab, a line feed and a carriage return in a field are written as `\t`, `\n` and `\r`, and a field that begins with `=`, `+`, `-`, `@` or a quotation mark gets an apostrophe in front. A spreadsheet would run the first four, and from a leading quotation mark it would read on to the next one, across cells and rows. Take the apostrophe off if you read the file with `awk` or `grep` and need the field as logged.
+When more than one applies, the first in this order wins: 1, 3, 4, 130. A run cut off by a restart leaves what it collected in the working folder it named at the start.
 
-## Using the command-line tool
+## The viewer
 
-`excel_diagnostics_cli.mjs` is one file with no dependencies. It needs Node 20 or later, or Deno 2 (`deno run -A` in place of `node`). Get it from this repository, from File → Get the command-line tool in the viewer, or with:
+Drop a bundle's zip, its folder, or single log files on the [viewer](https://cadengithubb.github.io/Excel_Diagnostics/). "Try it with sample data" loads a made-up bundle.
+
+- **Nothing is uploaded.** The page's Content-Security-Policy refuses network requests. You can save `index.html` and open it offline.
+- **Tabs:** Timeline (every log with timestamps, merged by time, with search and filters), Files and Overview. Reports and Memory appear when the bundle has reports or memory records.
+- **Times** are shown in the time zone of the Mac the bundle came from. The "Times in" menu switches to UTC or your own zone.
+- **Hatching** on the Timeline chart marks time the bundle has no macOS log for, such as a day whose search was cut short. It is not a quiet stretch.
+- **Export** writes one row per entry, with times in UTC. A field that starts with `=`, `+`, `-`, `@` or `"` gets an apostrophe in front, so a spreadsheet does not run it.
+- **Large bundles:** over about 1 GB, unzip first and drop the folder.
+
+## The command-line tool
+
+`excel_diagnostics_cli.mjs` is one file with no dependencies. It needs Node 20 or later, or Deno 2 (`deno run -A`). Get it from the viewer ("Download the tool" on the start page, or File > Get the command-line tool), a release, or:
 
 ```bash
 curl -O https://cadengithubb.github.io/Excel_Diagnostics/excel_diagnostics_cli.mjs
 ```
 
-Give it a bundle (the zip, the unzipped folder or a single log file) and a command:
+Give it a bundle (zip, folder or log file). With no command, it prints a summary:
 
 ```bash
-node excel_diagnostics_cli.mjs ~/Desktop/Excel_Diagnostics_collect_20260310_091500.zip
+node excel_diagnostics_cli.mjs ~/Desktop/Excel_Diagnostics_collect_20261114_091500.zip
 ```
 
-With no command it prints what the bundle holds and where to start. The word `sample` in place of a bundle opens made-up data.
+```bash
+node excel_diagnostics_cli.mjs ~/Desktop/Excel_Diagnostics_collect_20261114_091500.zip search --min-severity error
+```
 
-| Command | What it prints |
+```bash
+node excel_diagnostics_cli.mjs help examples
+```
+
+- `sample` in place of a bundle opens made-up data.
+- Most commands end with a "Next:" list of commands to run next, ready to copy.
+- A zip is unpacked once into `excel_diagnostics_cli` in the system's temporary folder and kept for later commands. `node excel_diagnostics_cli.mjs clean` deletes those copies.
+
+## OpenClaw
+
+`openclaw/` holds a plugin with ten read-only `excel_diag_*` tools and a skill, over the command-line tool. The agent reads bundles from one folder on the OpenClaw host; a call that names no bundle reads the one that changed last. It has not yet run in a live OpenClaw Gateway. See [`openclaw/INSTALL.md`](openclaw/INSTALL.md).
+
+## Developing
+
+Edit `src/` and `excel_diagnostics.sh`, never `index.html` or `excel_diagnostics_cli.mjs`. Then rebuild: `python3 build.py` builds both from `src/` and copies the collector into the page. `python3 build.py --check` fails if a built file is out of date.
+
+| Suite | Command |
 | --- | --- |
-| `summary` | What the bundle holds: entries, period, counts by severity, tag and process, each log source, the reports |
-| `search WORDS` | The entries that match, oldest first, each with an ID |
-| `count`, `histogram` | How many entries match per severity, source, tag or process, and when they were logged |
-| `show ID`, `context ID` | One entry in full, and everything every source logged around it |
-| `reports`, `memory` | The crash, hang and jetsam report files, and the memory files and figures |
-| `files`, `cat PATH` | The files in the bundle, and the text of one |
-| `export --out FILE` | Every matching entry as a tab-separated file |
-| `help`, `help search`, `help time`, `help examples` | The commands, the search syntax, how times are read, and step-by-step commands for common jobs |
+| Engine | `deno run --allow-read test/engine_test.mjs` |
+| Viewer | `deno run --allow-read test/viewer_md_test.mjs` |
+| Name hiding (Mac) | `bash test/redact_test.sh` |
+| Collector (Mac) | `bash test/collect_test.sh` |
+| Note and questions (Mac) | `bash test/note_test.sh` |
+| OpenClaw plugin | `node openclaw/tests/run.mjs` |
 
-`WORDS` is the viewer's search syntax: words, `"phrases"`, `/regular expressions/`, `-exclusions` and fields such as `process:excel` or `tag:memory`. `--from`, `--to`, `--around` and `--min-severity` narrow it further.
+The engine and viewer suites also run with `node`.
 
-It is written to be usable by an agent with no other instructions:
+## Known limits
 
-- Every command repeats the search as it understood it, says how many entries matched, and ends with a "Next:" list of commands that follow on, ready to copy.
-- When nothing matches, it counts again with each condition taken away in turn, so it is clear which one is responsible.
-- A mistyped command, option, field or time gets an answer that names the mistake and shows the right form.
-- It reports what the logs hold and draws no conclusions.
-
-A zip is unpacked once into the system's temporary folder so that later commands start quickly; `clean` deletes those folders. A folder is read where it is. Nothing is uploaded, and the only file it writes is the one named with `export --out`. `export` does not write into the bundle folder or through a link: give `--out` a path outside the folder being read. A path that reaches that folder another way (other capitals, or a link to it or to a folder inside it) counts as inside. It prints the real path of the file it wrote.
-
-For programs there is `excel_diagnostics_cli.mjs request`: one JSON request on standard input, one JSON document on standard output. The OpenClaw plugin in [`openclaw/`](openclaw/README.md) drives the tool that way.
-
-Each command is a new process that indexes the bundle again: about a second for a 240 MB bundle of 430,000 entries on an M1 Pro MacBook Pro. Tested with Node 24 and Deno 2.7.
-
-## Using it from an OpenClaw agent
-
-[`openclaw/`](openclaw/README.md) holds a plugin that gives an OpenClaw agent ten tools (`excel_diag_summary`, `excel_diag_search`, `excel_diag_show`, `excel_diag_context` and six more) and a skill, [`openclaw/SKILL.md`](openclaw/SKILL.md), that the agent reads before using them. The plugin does no log work itself: for each call it starts `excel_diagnostics_cli.mjs request` and lays the answer out for a small local model, with what was understood first, the log lines as plain text, and the calls that could follow last.
-
-Bundles are copied into one folder on the machine that runs OpenClaw, and the agent names them by id; it never sees a path on that machine. The tools report what the logs record and draw no conclusions.
-
-[`openclaw/INSTALL.md`](openclaw/INSTALL.md) covers installing it. `bash openclaw/plugin/deploy.sh --check` is the first step and changes nothing. The tests need no OpenClaw:
-
-```bash
-node openclaw/tests/run.mjs
-```
-
-They load the real plugin against a stand-in host and run the real command-line tool. They pass on Node 24 and Deno 2.7. Nothing in this folder has been run inside a live OpenClaw Gateway yet.
-
-## Working on the viewer
-
-The page is assembled from `src/` by a small script. There are no dependencies.
-
-```bash
-python3 build.py
-```
-
-The same command writes `excel_diagnostics_cli.mjs`, which is `src/core.js` followed by `src/cli.js`, `src/request.js` and `src/cli_main.js`. Rebuild after changing `excel_diagnostics.sh` too: the page carries a copy of it, and of the command-line tool, for the download buttons. `python3 build.py --check` fails if `index.html` or `excel_diagnostics_cli.mjs` is out of date.
-
-`src/core.js` does the indexing and searching in a Web Worker and can be run outside a browser. This loads a bundle with Deno and prints what was indexed, plus the results of a few searches:
-
-```bash
-deno run --allow-read test/core_test.js path/to/Excel_Diagnostics_….zip
-```
-
-With no path it uses the built-in sample data.
-
-`test/engine_test.mjs` checks the engine against answers worked out by hand: a small made-up bundle whose eighteen entries, searches, reports and export are all written out in the test. Its second half is about bundles that come from someone else: the ways a bundle can be handed over (folder, zip, checksum, enclosing folders), files in copied folders that look like the collector's or the system's own, 66,000 small logs in one bundle, and files made to be slow to read. It runs on Deno or Node in a few seconds:
-
-```bash
-deno run --allow-read test/engine_test.mjs
-```
-
-`--redact` has its own check, which runs on a Mac. It takes the redaction program out of the collector, runs it over made-up bundles and looks at what is left. It also checks that long lines of address-like text and a folder of thousands of names that hide to the same name take seconds, not hours, that the step ends with a status of its own at its time limit, that no name is made longer where a path would then pass 1,000 bytes (the number a taken name gets counted, and the paths below a folder), and that an entry too deep to be looked at is listed as not checked. `COLLECTOR_UNDER_TEST=path` points it, and the test below, at another copy of the collector:
-
-```bash
-bash test/redact_test.sh
-```
-
-`test/collect_test.sh` checks how the collector handles files it does not control. It runs the copying and listing steps on a made-up home folder holding links, a pipe, a file with special rights, and an unreadable file, files that claim more than they hold, and names with line breaks, tabs, invisible characters and a leading `-e`. It checks that when the user's rights cannot be taken on, nothing from the home folder reaches the bundle; that a file outside the home folder is not read through a link, a linked folder or a second name, also while it is being exchanged for a link; that a helper which does not finish is stopped; that a Desktop made into a link to a folder of root's is not where root moves anything; that a disk too full for bash to write a here-document stops the run instead of running an empty program; that a program that ends without an answer, or a write into the working folder that fails, is said and makes its step's row incomplete, with unified-log searches and the time ledger run against stand-ins and a small full disk image; in what order the exit statuses apply; which process is taken for Excel when a decoy is named like it; that what the user can make large is cut and said to be; that what root runs with a time limit leaves nothing behind after its limit or Ctrl-C; that text the user can choose reaches the bundle without control characters; and that what the bundle and the help say is what the code did: the reports copied are those of the rule `collection.log` and `source_catalog.tsv` give, `summary.md` names only files that are in its bundle, the lists say by what test they were made, and hang and repro say when Excel can be force-quit and when to reproduce the problem; that repro's live log stream and its watch are stopped, waited for and said as they ended when Ctrl-C, a second signal or a hangup comes (with stand-ins that end on SIGINT, as `log stream` does); and that a helper run with the user's rights that its kill does not end holds neither the run nor what reads its output more than seconds past its limit; that the kernel, `spindump`, `ReportCrash` and `osanalyticshelper` are tagged only by what a process cannot choose; that `summary.md` points at a row only when it is there, and a run stopped during a search writes what the search would have; and that a program between a search and its labeller that is killed is said as that. It cannot check the step from root to the user itself, since it is never root, and takes about two minutes:
-
-```bash
-bash test/collect_test.sh
-```
-
-`test/note_test.sh` checks what is recorded about an incident. It runs the top of the collector as it is, on a terminal of its own, to type at the questions (Return alone, a pasted paragraph, arrow keys, tabs), and runs the functions that write the files in a scratch folder. It also checks that what a run was told by one of the options that hand on what was found out about the note is said as that option, never as what happened, and what the file says of a note read in a locale that does not name UTF-8. It collects nothing and takes about a minute:
-
-```bash
-bash test/note_test.sh
-```
-
-`test/viewer_md_test.mjs` checks how the page draws that file: a typed line is shown as typed whatever it starts with, and a file from an older collector is told apart. It also runs the Memory tab and the file tree, taken out of `src/app.js`, against a stand-in page, with files made to be slow to read, to crowd the charts, or to carry markup in a name. It runs on Deno or Node:
-
-```bash
-deno run --allow-read test/viewer_md_test.mjs
-```
+- The parts that look at Excel itself (its logs, finding it running, `hang`'s capture) are tested with stand-ins only.
+- The tests never run as root.
+- Only Excel in `/Applications` is looked for.
+- Bundles from collectors before 1.5.0 can hold a PivotTable sentence nobody typed. The viewer marks such a file; the command-line tool and the agent print it as it is.
+- A note given with `--note` to a run that uses sudo, or typed before the script re-runs itself with sudo, is on a `sudo` command line. macOS logs that line, and a bundle can include it.
+- OneDrive's binary `.odl` logs and `.logarchive` bundles are not read by the viewer or the tool.
