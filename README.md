@@ -11,7 +11,7 @@ The tools show what was recorded. They do not say what caused a problem.
 
 ## Quick start
 
-1. Get the collector from the viewer ("Download the script"), a [release](https://github.com/CadenGithubB/Excel_Diagnostics/releases), or:
+1. Get the collector from [The viewer](https://cadengithubb.github.io/Excel_Diagnostics/) (File > "Download the script"), a [release](https://github.com/CadenGithubB/Excel_Diagnostics/releases), or:
 
    ```bash
    curl -O https://cadengithubb.github.io/Excel_Diagnostics/excel_diagnostics.sh
