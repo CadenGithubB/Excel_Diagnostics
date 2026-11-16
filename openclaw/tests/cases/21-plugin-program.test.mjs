@@ -18,8 +18,8 @@ import { describe, it, assert, loadPlugin, emptyDir, cleanup, blocks, SAMPLE_ID,
 
 const NO_ANSWER = 'the Excel diagnostics program did not answer';
 const HINT = {
-  timeout: 'The call took longer than this tool allows and was stopped: send it once more with a shorter time span (from and to) or with a smaller bundle, or tell the human that this bundle is too slow to search here.',
-  timeoutWhole: 'The call took longer than this tool allows and was stopped: send it once more with a smaller bundle, or tell the human that this bundle is too slow to search here.',
+  timeout: 'The call took longer than this tool allows and was stopped, so it gave no result. A shorter time span (from and to) gives it fewer entries to look through: send it once more with one, or tell the human that this call could not be answered in the time this tool allows.',
+  timeoutWhole: 'The call took longer than this tool allows and was stopped, so it gave no result: tell the human that this call could not be answered in the time this tool allows, and do not send the same call again.',
   missing: 'The program behind the excel_diag tools is not installed on the OpenClaw host: tell the human to run the Excel diagnostics installer again, and do not call these tools until the human says that is done.',
   start: 'The program behind the excel_diag tools could not be started on the OpenClaw host: tell the human, and do not call these tools again until the human says it is fixed.',
   cancelled: 'The call was cancelled before the program answered: send it again only if its result is still needed.',
@@ -135,12 +135,12 @@ describe('plugin program: no answer, by way of deps.run', () => {
     const p = await loadPlugin({ deps: prints(JSON.stringify(doc)) });
     const env = await p.raw.get('excel_diag_count')({});
     assert.deepEqual(env.details, { ok: true, tool: 'excel_diag_count', bundle: 'b1', matched: 2 });
-    assert.deepEqual(blocks(env), ['Facts about this call:\n- Fact: a real note', JSON.stringify(env.details)]);
+    assert.deepEqual(blocks(env), ['Facts about this call:\n- Fact: a real note', JSON.stringify(env.details), 'End of the excel_diag_count result.'], 'with no Next, a fixed last line');
     assert.equal(env.isError, undefined);
 
     const bare = await loadPlugin({ deps: prints('{"ok":true}') });
     const least = await bare.raw.get('excel_diag_memory')({});
-    assert.deepEqual(blocks(least), ['{"ok":true,"tool":"excel_diag_memory"}']);
+    assert.deepEqual(blocks(least), ['{"ok":true,"tool":"excel_diag_memory"}', 'End of the excel_diag_memory result.']);
   });
 
   it('the block order holds for any document: facts, the JSON line, the lines, Next: last', async () => {
@@ -187,11 +187,15 @@ describe('plugin program: no answer, by way of deps.run', () => {
     const spans = ['excel_diag_search', 'excel_diag_count', 'excel_diag_histogram'];
     for (const tool of p.raw.keys()) {
       const takesSpan = 'from' in p.definitions.get(tool).parameters.properties;
-      assert.equal(takesSpan, spans.includes(tool));
-      // A tool with no from and to must not be told to send them: the names would come back as ignoredFields.
-      checkNoAnswer(await p.raw.get(tool)({}), tool, takesSpan ? HINT.timeout : HINT.timeoutWhole);
+      assert.equal(takesSpan, spans.includes(tool) || tool === 'excel_diag_memory');
+      // A tool with no from and to must not be told to send them: the names would come back as ignoredFields. Nor
+      // must the memory tool, which reads its whole file whatever span it is sent.
+      checkNoAnswer(await p.raw.get(tool)({}), tool, spans.includes(tool) ? HINT.timeout : HINT.timeoutWhole);
     }
-    for (const hint of [HINT.timeout, HINT.timeoutWhole]) for (const word of ['smaller bundle', 'tell the human', 'too slow to search here']) assert.ok(hint.includes(word));
+    for (const hint of [HINT.timeout, HINT.timeoutWhole]) for (const word of ['tell the human', 'in the time this tool allows']) assert.ok(hint.includes(word));
+    // The program was stopped before it could say anything, so the hint says nothing of why the call took long: a
+    // one-entry bundle can be searched with a pattern that is slow, and the bundle is then not the cause
+    for (const hint of [HINT.timeout, HINT.timeoutWhole]) assert.ok(!/bundle|slow|smaller/.test(hint), hint);
     assert.ok(HINT.timeout.includes('from and to') && !HINT.timeoutWhole.includes('from'));
   });
 
@@ -247,6 +251,7 @@ describe('plugin program: started for real', () => {
         bundlesDir: p.bundlesDir,
         cacheDir: path.join(state, 'excel-diagnostics', 'cache'),
         params: { query: 'a "b" \\ $HOME `c`; rm', limit: 3 },
+        undeclared: { q: 'dropped' },
       });
       assert.deepEqual(d.args, ['request'], 'nothing the model sent is on the command line');
       for (const name of ['HOME', 'PATH', 'TMPDIR']) assert.ok(d.envNames.includes(name), `${name} is set`);

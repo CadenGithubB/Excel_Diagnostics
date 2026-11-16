@@ -6,7 +6,8 @@
 //
 // The order of the blocks is the dialog with a small model. How its call was read comes first ("Facts about this
 // call:"), then one JSON line of facts, then the quoted lines as plain text, and "Next:" last, where it is the
-// last thing read before the model's own turn. A failure is one JSON line. A name the tool does not declare is
+// last thing read before the model's own turn; a result with no Next ends with a fixed line of the plugin's, so that
+// the bundle's own text is never the last thing read. A failure is one JSON line. A name the tool does not declare is
 // said back (ignoredFields), because a guessed argument name that silently changes nothing reads as a filtered
 // result. And no block may show a path on the host: the model cannot open one, and it tries.
 import { promises as fs } from 'node:fs';
@@ -52,7 +53,8 @@ function checkEnvelope(env, tool, hidden) {
   }
 }
 
-// A success: [facts], the JSON line that is details, [the lines], [Next:], in that order and nothing else.
+// A success: [facts], the JSON line that is details, [the lines], then Next: or the line that ends a result with none,
+// in that order and nothing else.
 function checkSuccess(env, { facts, text, next }) {
   assert.deepEqual(Object.keys(env), ['content', 'details'], 'a success has no isError');
   assert.equal(env.details.ok, true);
@@ -75,6 +77,9 @@ function checkSuccess(env, { facts, text, next }) {
     assert.ok(typeof b[i] === 'string' && b[i].startsWith('Next: excel_diag_'), `Next: names a tool to call: ${String(b[i]).slice(0, 60)}`);
     assert.ok(b[i].endsWith(REPLY), 'Next: ends by allowing a reply');
     assert.equal(i, b.length - 1, 'Next: is the last block');
+    i++;
+  } else {
+    assert.equal(b[i], `End of the ${env.details.tool} result.`, 'with no Next, the fixed line that ends a result is the last block');
     i++;
   }
   assert.equal(b.length, i, `${b.length} blocks where ${i} were expected: ${b.map((x) => x.slice(0, 30)).join(' | ')}`);
@@ -112,17 +117,21 @@ async function refused(tool, params) {
 }
 
 describe('plugin results: each tool on the sample bundle', () => {
-  it('excel_diag_summary: the JSON line, one line per log source, then Next:', async () => {
-    const env = await ok('excel_diag_summary', {}, { text: true, next: true });
+  it('excel_diag_summary: facts, the JSON line, one line per report file, then Next:', async () => {
+    const env = await ok('excel_diag_summary', {}, { facts: true, text: true, next: true });
     const d = env.details;
     assert.deepEqual(Object.keys(d).slice(0, 3), ['ok', 'tool', 'bundle']);
     assert.equal(d.bundle, SAMPLE_ID);
     assert.equal(d.entries, 32861);
     assert.deepEqual(d.period, { from: '2026-03-10 09:00:00', to: '2026-03-10 11:59:59' });
-    assert.deepEqual(d.availableBundles, [SAMPLE_ID]);
+    assert.deepEqual(d.availableBundles, [{ id: SAMPLE_ID }]);
     const b = blocks(env);
-    assert.match(b[1].split('\n')[0], /^\s*ENTRIES\s+SOURCE\s+FIRST\s+LAST\s+FILE$/);
-    assert.ok(b[2].includes('excel_diag_search {minSeverity: "error"}') && b[2].includes('excel_diag_reports {}'), b[2]);
+    assert.ok(b[0].includes('- Fact: 5 log sources are on the timeline: excel_diag_count {by: "file"} lists them'), b[0]);
+    assert.match(b[2].split('\n')[1], /^\s*ID\s+TIME\s+KIND\s+PROCESS\s+FILE$/);
+    assert.ok(b[3].startsWith(`Next: excel_diag_reports {path: "${CRASH_REPORT}"}`) && b[3].includes('excel_diag_search {minSeverity: "error", from: '), b[3]);
+    // the whole result, as the model is handed it: one call answers the first questions, and it stays short
+    const size = b.reduce((n, x) => n + x.length, 0);
+    assert.ok(size > 3000 && size < 5000, `the summary came to ${size} characters`);
   });
 
   it('excel_diag_search: entries as plain lines, with ids the next call can copy', async () => {
@@ -158,44 +167,59 @@ describe('plugin results: each tool on the sample bundle', () => {
     assert.equal(env.details.id, 15501);
     assert.equal(env.details.process, 'Microsoft Excel');
     assert.equal(env.details.truncated, false);
-    assert.equal(blocks(env)[1], 'PivotCache: could not grow record buffer to 7 GB (out of memory), retrying with a smaller block');
+    assert.equal(blocks(env)[1], '  PivotCache: could not grow record buffer to 7 GB (out of memory), retrying with a smaller block');
+    assert.equal(env.details.printed, 'each line of the message after two spaces that are not part of it');
     assert.ok(!JSON.stringify(env.details).includes('PivotCache'), 'the message is not also put inside the JSON line');
   });
 
   it('excel_diag_context: the anchor entry is marked', async () => {
     const env = await ok('excel_diag_context', { id: 15501, before: 2, after: 2 }, { text: true, next: true });
     assert.equal(env.details.anchorId, 15501);
-    assert.deepEqual(env.details.shown, { firstId: 15499, lastId: 15503 });
+    assert.deepEqual(env.details.shown, { firstId: 15499, lastId: 15503, from: '2026-03-10 10:32:28.102', to: '2026-03-10 10:32:28.507' });
     const lines = blocks(env)[1].split('\n');
     assert.equal(lines.length, 6);
     assert.equal(lines.filter((l) => l.startsWith('>')).length, 1);
     assert.ok(lines[3].startsWith('>15501  '), lines[3]);
   });
 
-  it('excel_diag_reports: one line per report file, with the path to read it by', async () => {
+  it('excel_diag_reports: one line per report file, with the path to lay it out by', async () => {
     const env = await ok('excel_diag_reports', {}, { text: true, next: true });
     assert.equal(env.details.reports, 2);
     assert.deepEqual(env.details.byKind, { Jetsam: 1, Crash: 1 });
-    assert.match(blocks(env)[1].split('\n')[0], /^TIME\s+KIND\s+PROCESS\s+FILE$/);
+    assert.match(blocks(env)[1].split('\n')[0], /^\s*ID\s+TIME\s+KIND\s+PROCESS\s+FILE$/);
     assert.ok(blocks(env)[1].includes(CRASH_REPORT));
-    assert.ok(blocks(env)[2].includes(`excel_diag_read_file {path: "${CRASH_REPORT}"}`));
+    assert.ok(blocks(env)[2].includes(`excel_diag_reports {path: "${CRASH_REPORT}"}`));
+  });
+
+  it('excel_diag_reports with a path: a fact that this is a layout, the JSON line, the report laid out, then Next:', async () => {
+    const env = await ok('excel_diag_reports', { path: CRASH_REPORT }, { facts: true, text: true, next: true });
+    assert.equal(env.details.path, CRASH_REPORT);
+    assert.equal(env.details.id, 19089);
+    const b = blocks(env);
+    assert.ok(b[0].includes("These lines are this tool's layout of the report, not the file's own lines"), b[0]);
+    assert.ok(b[2].split('\n').includes('Exception type: EXC_BAD_ACCESS (SIGSEGV)'), b[2]);
+    assert.ok(b[3].startsWith('Next: excel_diag_context {id: 19089}'), b[3]);
   });
 
   it('excel_diag_files: a cut list says so and gives the offset to go on from', async () => {
-    const env = await ok('excel_diag_files', { limit: 5 }, { text: true, next: true });
+    const env = await ok('excel_diag_files', { limit: 5 }, { facts: true, text: true, next: true });
     assert.equal(env.details.files, 17);
     assert.equal(env.details.truncated, true);
     assert.equal(env.details.nextOffset, 5);
-    assert.match(blocks(env)[1].split('\n')[0], /^\s*SIZE\s+TIMELINE_ENTRIES\s+PATH$/);
-    assert.equal(blocks(env)[1].split('\n').length, 6);
+    // more files than the call lists: the fact gives the words of the collector's folders that filter can take
+    assert.equal(blocks(env)[0], `${FACTS}\n- Fact: This bundle has 17 files, more than this call lists. filter keeps only the paths that contain it: "reports" keeps 3, "office" keeps 4, "unified_logs" keeps 2 and "system" keeps 3.`);
+    assert.match(blocks(env)[2].split('\n')[0], /^\s*SIZE\s+TIMELINE_ENTRIES\s+PATH$/);
+    assert.equal(blocks(env)[2].split('\n').length, 6);
+    const all = await ok('excel_diag_files', {}, { text: true, next: true });
+    assert.equal(all.details.truncated, false, 'a page holds all 17, so no fact is needed');
   });
 
-  it('excel_diag_read_file: the lines as they are in the file', async () => {
+  it('excel_diag_read_file: the lines of the file, each after its number, under a lead line', async () => {
     const env = await ok('excel_diag_read_file', { path: 'summary.md', limit: 5 }, { text: true, next: true });
     assert.equal(env.details.path, 'summary.md');
     assert.deepEqual(env.details.shown, { fromLine: 1, toLine: 5 });
     assert.equal(env.details.nextFromLine, 6);
-    assert.equal(blocks(env)[1].split('\n')[0], '# Excel diagnostics summary');
+    assert.deepEqual(blocks(env)[1].split('\n').slice(0, 2), ['Lines 1 to 5 of the file, each after its line number:', '1: # Excel diagnostics summary']);
   });
 
   it('excel_diag_memory: figures only, no lines', async () => {
@@ -236,7 +260,7 @@ describe('plugin results: notes, nothing found, refusals', () => {
     assert.deepEqual(blocks(env)[0].split('\n'), [
       FACTS,
       `- Fact: bundle "sample" was read as "${SAMPLE_ID}".`,
-      '- Fact: limit 500 is more than this tool returns in one call; 80 was used.',
+      '- Fact: limit 500 is more than this tool returns in one call; 40 was used.',
     ]);
   });
 
@@ -286,35 +310,56 @@ describe('plugin results: notes, nothing found, refusals', () => {
 describe('plugin results: undeclared argument names', () => {
   it('the call still runs, and the name is said back first with the names that are allowed', async () => {
     const { p } = await sample();
-    const env = await ok('excel_diag_search', { q: 'crash', limit: 2 }, { facts: true, text: true, next: true });
-    assert.equal(blocks(env)[0], `${FACTS}\n- Fact: q is not a field of excel_diag_search and was ignored, so this result is not narrowed by it. Send the call again with one of the allowed fields if it mattered.`);
-    assert.deepEqual(env.details.ignoredFields, ['q']);
+    const env = await ok('excel_diag_search', { terms: 'crash', limit: 2 }, { facts: true, text: true, next: true });
+    assert.equal(blocks(env)[0], `${FACTS}\n- Fact: terms is not a field of excel_diag_search and was ignored, so this result is not narrowed by it. Send the call again with one of the allowed fields if it mattered.`);
+    assert.deepEqual(env.details.ignoredFields, ['terms']);
     assert.deepEqual(env.details.allowedFields, Object.keys(p.definitions.get('excel_diag_search').parameters.properties));
     assert.deepEqual(Object.keys(env.details).slice(-2), ['ignoredFields', 'allowedFields'], 'they end the JSON line');
   });
 
-  it('no alias is accepted: q is not taken for query', async () => {
-    const env = await ok('excel_diag_search', { q: 'crash', limit: 2 }, { facts: true, text: true, next: true });
+  it('no alias is accepted: a name the program does not know is not taken for another', async () => {
+    const env = await ok('excel_diag_search', { terms: 'crash', limit: 2 }, { facts: true, text: true, next: true });
     assert.equal(env.details.query, '');
     assert.equal(env.details.matched, env.details.total, 'every entry matched, so nothing was narrowed');
-    const path_ = await refused('excel_diag_read_file', { file: 'summary.md' });
-    assert.equal(path_.details.error, 'path is missing');
-    assert.deepEqual(path_.details.ignoredFields, ['file']);
+  });
+
+  it('a name that stands for an argument of another name is refused with that argument and the value sent, and nothing runs', async () => {
+    const { p } = await sample();
+    const [search, read] = await Promise.all([refused('excel_diag_search', { q: 'crash', limit: 2 }), refused('excel_diag_read_file', { file: 'summary.md', junk: 1 })]);
+    // field is the argument to send in its place, one the tool has, and the names it does not have narrowed nothing, as ever
+    assert.deepEqual(search.details, { ok: false, tool: 'excel_diag_search', error: 'q is not a field of excel_diag_search', field: 'query',
+      hint: 'Send query in place of q, with the value that was sent: {query: "crash"}. This call did not run.', ignoredFields: ['q'], allowedFields: Object.keys(p.definitions.get('excel_diag_search').parameters.properties) });
+    assert.equal(read.details.error, 'file is not a field of excel_diag_read_file');
+    assert.equal(read.details.field, 'path');
+    assert.equal(read.details.hint, 'Send path in place of file, with the value that was sent: {path: "summary.md"}. This call did not run.');
+    assert.deepEqual(read.details.ignoredFields, ['file', 'junk']);
+    assert.deepEqual(read.details.allowedFields, ['path', 'fromLine', 'limit', 'grep', 'bundle']);
+    // the call the hint gives runs
+    const fixed = await ok('excel_diag_search', { query: 'crash', limit: 2 }, { text: true, next: true });
+    assert.ok(fixed.details.matched < fixed.details.total);
   });
 
   it('its note stands before the notes of the program', async () => {
-    const env = await ok('excel_diag_search', { pattern: 'x', regex: true, bundle: 'sample', limit: 1 }, { facts: true, text: true, next: true });
+    const env = await ok('excel_diag_search', { terms: 'x', regex: true, bundle: 'sample', limit: 1 }, { facts: true, text: true, next: true });
     const lines = blocks(env)[0].split('\n');
     assert.equal(lines.length, 3);
-    assert.equal(lines[1], '- Fact: pattern and regex are not fields of excel_diag_search and were ignored, so this result is not narrowed by them. Send the call again with the allowed fields if they mattered.');
+    assert.equal(lines[1], '- Fact: terms and regex are not fields of excel_diag_search and were ignored, so this result is not narrowed by them. Send the call again with the allowed fields if they mattered.');
     assert.equal(lines[2], `- Fact: bundle "sample" was read as "${SAMPLE_ID}".`);
-    assert.deepEqual(env.details.ignoredFields, ['pattern', 'regex']);
+    assert.deepEqual(env.details.ignoredFields, ['terms', 'regex']);
+  });
+
+  it('many ignored names are said back as the first ten, each cut short, and how many more', async () => {
+    const names = Array.from({ length: 13 }, (_, i) => `n${i}${i === 2 ? 'x'.repeat(60) : ''}`);
+    const env = await ok('excel_diag_files', Object.fromEntries([...names.map((n) => [n, 1]), ['limit', 1]]), { facts: true, text: true, next: true });
+    const said = names.slice(0, 10).map((n) => (n.length > 40 ? `${n.slice(0, 40)}\u2026` : n));
+    assert.deepEqual(env.details.ignoredFields, said);
+    assert.ok(blocks(env)[0].split('\n')[1].startsWith(`- Fact: ${said.join(', ')} and 3 more are not fields of excel_diag_files and were ignored`), blocks(env)[0]);
   });
 
   it('a refusal carries the two lists too, in its one JSON line', async () => {
-    const env = await refused('excel_diag_show', { entry: 15501 });
+    const env = await refused('excel_diag_show', { entryNumber: 15501 });
     assert.equal(env.details.error, 'id is missing');
-    assert.deepEqual(env.details.ignoredFields, ['entry']);
+    assert.deepEqual(env.details.ignoredFields, ['entryNumber']);
     assert.deepEqual(env.details.allowedFields, ['id', 'maxChars', 'utc', 'bundle']);
   });
 
@@ -345,7 +390,7 @@ describe('plugin results: undeclared argument names', () => {
 describe('plugin results: arguments that are not an object', () => {
   it('are treated as {}', async () => {
     for (const params of [undefined, null, 'summary', 42, true, ['bundle', 'x']]) {
-      const env = await ok('excel_diag_summary', params, { text: true, next: true });
+      const env = await ok('excel_diag_summary', params, { facts: true, text: true, next: true });
       assert.equal(env.details.entries, 32861, `params ${JSON.stringify(params)}`);
       assert.equal(env.details.ignoredFields, undefined);
     }

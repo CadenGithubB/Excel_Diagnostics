@@ -38,6 +38,23 @@
     worker.onerror = (e) => fail(e.message || 'The background worker stopped unexpectedly.');
   }
   const call = (op, args) => new Promise((res, rej) => { const id = ++seq; pending.set(id, { res, rej }); worker.postMessage({ id, op, args }); });
+  // The engine is also run on this page, from the page's copy of it, for its reader of a /regex/ (Core.rxCompile):
+  // what a /regex/ term matched in a line is marked by the reader that found the line, never by the browser's own,
+  // which can take longer on one line than anyone would wait. Until that copy has run, a /regex/ is not marked.
+  // The From and To boxes check a typed time by the engine's rules too (Core.timeBad), once that copy has run (coreRan).
+  let rxHere = null, coreHere = null;
+  const coreRan = new Promise((ran) => {
+    const el = document.createElement('script');
+    el.src = URL.createObjectURL(new Blob([$('#core-src').textContent], { type: 'text/javascript' }));
+    el.onload = () => { coreHere = typeof Core !== 'undefined' ? Core : null; rxHere = coreHere ? coreHere.rxCompile : null; if (info) schedule(); ran(); };
+    el.onerror = () => ran();
+    document.head.append(el);
+  });
+  const marker = (h) => {                               // what marks one term's matches: a reader, a RegExp, or null
+    if (!h.rx) { try { return new RegExp(h.src, 'g' + h.flags); } catch (e) { return null; } }
+    const rx = rxHere ? rxHere(h.src, h.flags) : null;
+    return rx && !rx.why ? rx : null;
+  };
 
   // ---------- state ----------
   let info = null, tzMode = 'bundle';
@@ -83,11 +100,24 @@
       ? 'How times are displayed. The logged Mac is the one the bundle was collected on; its zone is read from its macOS log.'
       : "How times are displayed. These logs do not record the logged Mac's time zone, so times are in yours or in UTC.";
   }
-  function parseTime(str) {                             // "YYYY-MM-DD HH:MM[:SS]" in the display zone -> UTC ms
+  // A time typed into the From or To box: YYYY-MM-DD, then HH:MM, HH:MM:SS, HH:MM:SS.fff or no time of day, read in
+  // the zone times are shown in. Each part has to be one that can be, by the rules the command-line tool reads times
+  // by (Core.timeBad), and the moment one the tools read (Core.TIME_FIRST to Core.TIME_LAST): left to Date, 2026-13-45
+  // would be read as 2027-02-14 and 09:00:99 as 09:01:39. Gives { t }, the moment in UTC ms, or { why }, what keeps the
+  // page from using it, in words. Those words hold only digits of the parts, never other text from the box.
+  function readTime(str) {
     const m = /^\s*(\d{4})-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,3}))?)?)?\s*$/.exec(str);
-    if (!m) return NaN;
-    const naive = Date.UTC(+m[1], m[2] - 1, +m[3], +m[4] || 0, +m[5] || 0, +m[6] || 0, +(m[7] || '0').padEnd(3, '0'));
-    return naive - offsetAt(naive - offsetAt(naive) * 60000) * 60000;
+    if (!m) return { why: 'it is not written as YYYY-MM-DD HH:MM:SS (the seconds, or the whole time of day, can be left out)' };
+    if (!coreHere) return { why: 'this page could not start the engine that checks a time' };
+    const { bad } = coreHere.timeBad({ y: m[1], mo: m[2], d: m[3], h: m[4], mi: m[5], s: m[6] });
+    if (bad.length) return { why: bad.join('; ') };
+    const at = new Date(0);
+    at.setUTCFullYear(+m[1], m[2] - 1, +m[3]);            // setUTCFullYear, not Date.UTC: that reads the years 0 to 99 as 1900 to 1999
+    at.setUTCHours(+m[4] || 0, +m[5] || 0, +m[6] || 0, +(m[7] || '0').padEnd(3, '0'));
+    const naive = at.getTime(), t = naive - offsetAt(naive - offsetAt(naive) * 60000) * 60000;
+    if (t < coreHere.TIME_FIRST) return { why: `it is before ${coreHere.stamp(coreHere.TIME_FIRST, 0)} UTC, the earliest time this page reads` };
+    if (t > coreHere.TIME_LAST) return { why: `it is after ${coreHere.stamp(coreHere.TIME_LAST, 0)} UTC, the latest time this page reads` };
+    return { t };
   }
   const fmtSpan = (ms) => (ms < 1000 ? `${Math.round(ms)} ms` : ms < 120e3 ? `${(ms / 1000).toFixed(ms < 10e3 ? 1 : 0)} s` : ms < 7200e3 ? `${Math.round(ms / 60e3)} min` : ms < 172800e3 ? `${(ms / 3600e3).toFixed(1)} h` : `${(ms / 86400e3).toFixed(1)} days`);
 
@@ -194,7 +224,7 @@
     if (gen !== qGen) return;
     $('#tab-timeline').classList.remove('busy');
     $('#searchbar').hidden = true;
-    view = { count: r.count, total: r.total, hist: r.hist, hl: r.hl.map((h) => { try { return new RegExp(h.src, 'g' + h.flags); } catch (e) { return null; } }).filter(Boolean) };
+    view = { count: r.count, total: r.total, hist: r.hist, hl: r.hl.map(marker).filter(Boolean) };
     pages = new Map();
     lastFacets = r.facets;
     const c = $('#count');
@@ -523,6 +553,7 @@
     const t0 = S.t0 != null ? S.t0 : info.t0, t1 = S.t1 != null ? S.t1 : info.end;
     $('#tFrom').value = fmtTime(t0, false);
     $('#tTo').value = fmtTime(t1, false);
+    rangeNote('');                                      // the boxes hold the window again, so nothing is left to say of them
     $('#tzNote').textContent = `${tzLabel(t0)} · ${fmtSpan(t1 - t0)}`;
     $('#allTime').disabled = S.t0 == null && S.t1 == null;
     $('#zoomOut').disabled = S.t0 == null && S.t1 == null;
@@ -532,6 +563,30 @@
     S.t0 = t0 != null && t0 <= info.t0 ? null : t0;
     S.t1 = t1 != null && t1 > info.end ? null : t1;
     schedule();
+  }
+  // The note beside the From and To boxes, put in as text, and which of the boxes holds what it is about (bad: one
+  // flag for each box, From first)
+  function rangeNote(text, bad = [false, false]) {
+    const el = $('#tNote'), was = !el.hidden;
+    el.textContent = text;
+    el.hidden = !text;
+    ['#tFrom', '#tTo'].forEach((id, k) => { if (bad[k]) $(id).setAttribute('aria-invalid', 'true'); else $(id).removeAttribute('aria-invalid'); });
+    if (was || text) { layout(); setTop(topRow); }        // the note takes room from the list of entries, or gives it back
+  }
+  // What is typed in the From and To boxes is used only when both hold a time the page reads (readTime), the start
+  // before the end. Otherwise the window stays as it was, each box keeps what was typed in it, and the note beside
+  // the boxes says which time was not used and why, until the boxes are next written (renderRange).
+  async function rangeTyped() {
+    await coreRan;
+    const a = readTime($('#tFrom').value), b = readTime($('#tTo').value), said = [];
+    if (a.why) said.push(`The start time was not used: ${a.why}.`);
+    if (b.why) said.push(`The end time was not used: ${b.why}.`);
+    const order = !said.length && b.t <= a.t;
+    if (order) said.push('The start time is not before the end time, so neither was used.');
+    if (!said.length) { rangeNote(''); setRange(a.t, b.t); return; }
+    const t0 = S.t0 != null ? S.t0 : info.t0, t1 = S.t1 != null ? S.t1 : info.end;
+    if (t0 === t0 && t1 === t1) said.push(`The time window is still ${fmtTime(t0, false)} to ${fmtTime(t1, false)}.`);
+    rangeNote(said.join(' '), [!!a.why || order, !!b.why || order]);
   }
 
   // ---------- virtual table ----------
@@ -582,7 +637,20 @@
   function mark(text) {                                 // escape, highlighting what the search terms matched
     if (!view.hl.length) return esc(text);
     const spans = [];
+    // Steps the /regex/ readers may take for this text, all their terms and matches together: each place a reader
+    // looks at in its pattern, at each place in the text, is one (find() in src/core.js): a fraction of a second
+    let most = 5e6;
     for (const re of view.hl) {
+      if (re.find) {
+        for (let at = 0, guard = 0; guard < 300 && at <= text.length && most > 0; guard++) {
+          const m = re.find(text, at, most);
+          most -= re.steps;
+          if (!m) break;
+          if (m[1] === m[0]) { at = m[1] + 1; continue; }
+          spans.push(m); at = m[1];
+        }
+        continue;
+      }
       re.lastIndex = 0;
       for (let m, guard = 0; (m = re.exec(text)) && guard < 300; guard++) { if (!m[0].length) { re.lastIndex++; continue; } spans.push([m.index, m.index + m[0].length]); }
     }
@@ -759,8 +827,11 @@
       return;
     }
     state.text = new TextDecoder().decode(bytes);
-    if (/\.md$/i.test(f.path)) body.innerHTML = `<div class="doc">${f.path === 'case/incident_context.md' ? contextHeading(state.text).lead : ''}${mdOrPlain(state.text)}</div>`;
-    else if (table) body.innerHTML = `<div class="tbl">${tableHtml(state.text, /\.csv$/i.test(f.path) ? ',' : '\t')}</div>`;
+    if (/\.md$/i.test(f.path)) {
+      const lead = f.path === 'case/incident_context.md' ? (await contextHeading(await caseText(f, got, state.text))).lead : '';
+      if (openState !== state) return;
+      body.innerHTML = `<div class="doc">${lead}${mdOrPlain(state.text)}</div>`;
+    } else if (table) body.innerHTML = `<div class="tbl">${tableHtml(state.text, /\.csv$/i.test(f.path) ? ',' : '\t')}</div>`;
     else { $('#lineFilter').hidden = false; renderText(); }
   }
   function renderText() {
@@ -883,26 +954,23 @@
     }
     return out;
   }
-  // Which collector wrote case/incident_context.md. Before 1.5.0 the collector put its own sentences there; from
-  // 1.5.0 the file holds only what whoever ran it gave. Told apart by what the file holds, not by the bundle, and
-  // line by line as md() reads it, so that nothing inside a typed line or a path can pass for a line of its own.
   const mdOrPlain = (text) => { try { return md(text); } catch (err) { return `<pre>${esc(text)}</pre>`; } };
-  function contextKind(text) {
-    const lines = text.split(/\r?\n/);
-    if (lines.some((l) => /^- Case: /.test(l) || /^## (Reported behavior|Best next capture)\s*$/.test(l))) return 'old';
-    return lines.some((l) => /^- Collector started: /.test(l)) ? 'given' : 'other';
-  }
-  // The title for that file and, for one from an older collector, the paragraph shown above it. Used wherever the
-  // file is drawn, so that the older collector's own sentences are never shown without it.
-  function contextHeading(text) {
-    const kind = contextKind(text);
+  // The title for case/incident_context.md and, for one that holds an older collector's lines, the paragraph shown
+  // above it. Used wherever the file is drawn, so that the older collector's own sentences are never shown without
+  // it. Which collector wrote the file, and what is said of it, is the engine's to tell (contextRead in core.js), from
+  // the text drawn here: the command-line tool and the agent tools ask the same function, so the three never tell one
+  // file apart differently, and the text under a heading is called the older collector's only when it is word for
+  // word what that collector wrote there. The sentences are the engine's fixed ones: none holds the file's own text.
+  async function contextHeading(text) {
+    const { kind, said, both } = await call('contextRead', { text });
     if (kind === 'given') return { name: 'Incident context, as given when the collector was run', lead: '' };
-    if (kind !== 'old') return { name: 'Incident context', lead: '' };
-    return { name: 'Incident context, from an older collector',
-      lead: '<p class="note">The "Case" line and the sentences under "Reported behavior" and "Best next capture" in this file are the collector\'s own wording. ' +
-        'Collectors before 1.5.0 wrote them when the question "Is this the crash when filtering a PivotTable?" was answered yes, which pressing Return also did, ' +
-        'or when <code>--case pivot-filter</code> was given. Nobody typed those sentences.</p>' };
+    const lead = said.length ? `<p class="note">${said.map((s) => esc(s).replace(/--case\b/g, '<code>--case</code>')).join(' ')}</p>` : '';
+    return { name: kind === 'old' && !both ? 'Incident context, from an older collector' : 'Incident context', lead };
   }
+  // The case file is told apart on as much of it as the command-line tool and request mode read (CASE_READ, their
+  // READ_CAP), not on the part drawn here: the text under a heading can go on past what is drawn
+  const CASE_READ = 32 << 20;
+  const caseText = async (f, got, text) => (got.bytes.byteLength >= got.size ? text : new TextDecoder().decode((await call('fileChunk', { i: f.i, offset: 0, len: Math.min(got.size, CASE_READ) })).bytes));
 
   // ---------- overview tab ----------
   let overviewRun = 0;                                  // a redraw that starts while another is still reading files replaces it
@@ -932,7 +1000,8 @@
       const got = await call('fileChunk', { i: f.i, offset: 0, len: 256 << 10 });
       if (info !== gen || run !== overviewRun) return;
       const text = new TextDecoder().decode(got.bytes), d = document.createElement('details');
-      const { name, lead } = path === 'case/incident_context.md' ? contextHeading(text) : { name: title, lead: '' };
+      const { name, lead } = path === 'case/incident_context.md' ? await contextHeading(await caseText(f, got, text)) : { name: title, lead: '' };
+      if (info !== gen || run !== overviewRun) return;
       d.open = open;
       d.innerHTML = `<summary>${esc(name)} <span class="dim">${esc(path)}</span></summary><div class="doc">${lead}${/\.md$/.test(path) ? mdOrPlain(text) : `<pre>${esc(text)}</pre>`}</div>`;
       $('#docs').append(d);
@@ -1469,13 +1538,7 @@
   function sideShown() { const shown = getComputedStyle($('#side')).display !== 'none'; $('#facetToggle').setAttribute('aria-expanded', String(shown)); return shown; }
   $('#facetToggle').addEventListener('click', toggleSide);
   $('#sideClose').addEventListener('click', toggleSide);
-  for (const id of ['tFrom', 'tTo']) {
-    $('#' + id).addEventListener('change', () => {
-      const a = parseTime($('#tFrom').value), b = parseTime($('#tTo').value);
-      if (a !== a || b !== b || b <= a) { flash('Use YYYY-MM-DD HH:MM:SS, with the start before the end'); renderRange(); return; }
-      setRange(a, b);
-    });
-  }
+  for (const id of ['tFrom', 'tTo']) $('#' + id).addEventListener('change', rangeTyped);
   $('#allTime').addEventListener('click', () => { S.t0 = S.t1 = null; $('#banner').hidden = true; schedule(); });
   $('#bannerAll').addEventListener('click', () => { S.t0 = S.t1 = null; $('#banner').hidden = true; schedule(); });
   $('#bannerClose').addEventListener('click', () => { $('#banner').hidden = true; layout(); setTop(topRow); });

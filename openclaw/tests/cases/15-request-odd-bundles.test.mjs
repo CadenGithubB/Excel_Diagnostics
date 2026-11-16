@@ -58,14 +58,40 @@ describe('request mode: a bundle whose clock changed, and that covers more than 
     assert.equal(r.entries, 5);
     assert.deepEqual(r.period, { from: '2025-12-31 20:00:00', to: '2026-06-03 09:30:00' });
     assert.deepEqual(r.mainPeriod, { from: '2026-06-01 08:59:00', to: '2026-06-03 09:31:00' });
-    assert.deepEqual(r.availableBundles, [TWO_ZONES, NO_LOGS]);
+    assert.deepEqual(r.availableBundles, [{ id: TWO_ZONES, mode: 'repro', startedLocal: '2026-06-03 10:00:00' }, { id: NO_LOGS }]);
     const notes = d.text.split('\n').filter((l) => l.startsWith('Note: '));
     assert.equal(notes.length, 3);
-    assert.equal(notes[0], 'Note: The macOS and Excel logs cover 2026-06-01 08:59:00 to 2026-06-03 09:31:00 (mainPeriod). Entries outside that come from other sources, such as install history, sleep and wake records and reports.');
+    assert.equal(notes[0], 'Note: The macOS and Excel logs cover 2026-06-01 08:59:00-04:00 to 2026-06-03 09:31:00-05:00 (mainPeriod). Entries outside that come from other sources, such as install history, sleep and wake records and reports.');
     assert.equal(notes[1], "Note: The Mac's clock changed UTC offset during this period (UTC-04:00, UTC-05:00). Local times can appear to jump backwards or forwards at those moments; send utc: true for a steady clock.", 'the offsets are given; no reason for the change is offered');
     assert.equal(notes[2], "Note: 1 OneDrive .odl/.odlgz/.odlsent/.aodl files are in Microsoft's obfuscated binary format; excel_diag_files lists them, but they cannot be read or searched.");
     assert.ok(!/Times in|under Files|this page|browser/.test(d.text), 'nothing that only makes sense in the web page');
-    assert.deepEqual(d.notes, []);
+    assert.deepEqual(d.notes, ['2 log sources are on the timeline: excel_diag_count {by: "file"} lists them, with the entries each gave.']);
+  });
+
+  it('a histogram sent no span counts the main period, says so, and gives the call for the whole period', async () => {
+    const [main, whole, around, nothing] = await Promise.all([ask('histogram', {}), ask('histogram', { from: '2025-12-31 20:00:00' }),
+      ask('histogram', { aroundId: 3, window: '1h' }), ask('histogram', { query: 'installed' })]);
+    // the span mainPeriod gives in the summary, to the second. The clock changed its offset in the bundle, so a time in a
+    // call offered carries the offset it was printed on: without it, it is read on the clock the bundle starts on
+    assert.deepEqual([main.receipt.from, main.receipt.to, main.receipt.matched, main.receipt.total], ['2026-06-01 08:59:00', '2026-06-03 09:31:00', 4, 5]);
+    assert.deepEqual(main.notes, ['No from, to, aroundId or aroundTime was sent, so this counts the main period only, where the bundle\'s macOS and Excel logs are (mainPeriod in excel_diag_summary): from 2026-06-01 08:59:00-04:00 to 2026-06-03 09:31:00-05:00. excel_diag_histogram {from: "2025-12-31 20:00:00-04:00"} counts the whole period.']);
+    // the call it gives counts every entry, and a span sent is counted as sent, with no such fact
+    assert.deepEqual([whole.receipt.matched, whole.receipt.total], [5, 5]);
+    assert.deepEqual(whole.notes, []);
+    assert.ok(!around.notes.some((n) => n.startsWith('No from, to')), JSON.stringify(around.notes));
+    // what is only outside the main period matches nothing there, and the call offered without the window is the whole period
+    assert.equal(nothing.receipt.matched, 0);
+    assert.deepEqual(nothing.receipt.withoutEach, [{ without: 'the time window', matched: 1 }, { without: 'the query term installed', matched: 4 }]);
+    assert.ok(nothing.next.startsWith('excel_diag_histogram {query: "installed", from: "2025-12-31 20:00:00-04:00"} is this call without the time window, which 1 entry matches.'), nothing.next);
+  });
+
+  it('the summary offers the histogram of the main period as that call, sent no span, which counts every entry of it', async () => {
+    // mainPeriod.to is printed on the clock of the Mac when it ends, and read back today on the clock it began on: sent
+    // as to, it ends the span before the last entries of the main period
+    const [summary, main] = await Promise.all([ask('summary'), ask('histogram', {})]);
+    assert.ok(summary.next.includes('excel_diag_histogram {} shows when entries were logged in the main period.'), summary.next);
+    assert.ok(!summary.next.includes('excel_diag_histogram {from'), summary.next);
+    assert.equal(main.receipt.matched, 4, 'the four entries of the main period');
   });
 
   it('each entry is shown on the clock the Mac was on at that moment', async () => {
@@ -83,7 +109,7 @@ describe('request mode: a bundle whose clock changed, and that covers more than 
 
   it('a time with no date is refused when the bundle covers more than one day', async () => {
     const [search, context] = await Promise.all([ask('search', { from: '09:00' }), ask('context', { time: '09:00:05' })]);
-    assert.deepEqual(search, { ok: false, bundle: TWO_ZONES, error: 'from has no date', field: 'from', hint: 'This bundle covers more than one day (2025-12-31 20:00:00 to 2026-06-03 09:30:00), so from needs a date. Write it like "2026-06-03 09:30:00".' });
+    assert.deepEqual(search, { ok: false, bundle: TWO_ZONES, error: 'from has no date', field: 'from', hint: 'This bundle covers more than one day (2025-12-31 20:00:00-04:00 to 2026-06-03 09:30:00-05:00), so from needs a date. Write the day before the time that was sent, for example "2026-06-03 09:00", with any day from 2025-12-31 to 2026-06-03.' });
     assert.equal(context.error, 'time has no date');
     assert.equal(context.field, 'time');
   });
@@ -139,6 +165,17 @@ describe('request mode: a bundle with no log in it', () => {
     }
   });
 
+  it('a time sent to it is refused with no time made up for an example, and a time of day as one with no date', async () => {
+    const [notTime, noDay, memory, empty] = await Promise.all([ask('search', { ...p, from: 'yesterday' }), ask('memory', { ...p, time: '10:35' }), ask('memory', { ...p, time: '2026-01-01 10:35' }),
+      ask('memory', { ...p, from: 'soon' })]);
+    // a search with no entries to search is answered before its times are read; memory reads them
+    assert.equal(notTime.ok, true);
+    assert.deepEqual(noDay, { ok: false, bundle: NO_LOGS, error: 'time has no date', field: 'time', hint: 'This bundle has no timeline entries to take a day from, so time needs a date, written YYYY-MM-DD HH:MM:SS. "10:35" was sent.' });
+    assert.deepEqual(memory.notes, ['This bundle has no memory timeline (excel_memory_timeline.csv), so time, from and to pick no samples.', 'This bundle holds no memory files and no log entries tagged memory.']);
+    assert.equal(empty.error, 'from is not a time');
+    assert.equal(empty.hint, '"soon" cannot be read as a time. Write from as YYYY-MM-DD HH:MM:SS (the seconds and the time of day are optional). It is read in UTC, because these logs do not record the Mac\'s time zone, unless it ends in Z or an offset such as -05:00.');
+  });
+
   it('reports and memory are empty, files and read_file work', async () => {
     const [reports, memory, files, text] = await Promise.all([ask('reports', p), ask('memory', p), ask('files', p), ask('read_file', { ...p, path: 'notes.txt' })]);
     assert.deepEqual(reports.receipt, { reports: 0, byKind: {}, shown: 0, truncated: false });
@@ -148,7 +185,7 @@ describe('request mode: a bundle with no log in it', () => {
     assert.deepEqual(memory.notes, ['This bundle holds no memory files and no log entries tagged memory.']);
     assert.equal(files.receipt.files, 2);
     assert.match(files.text, /^\s*8 B\s+-\s+data\.csv$/m);
-    assert.equal(text.text, 'first line\nsecond line');
+    assert.equal(text.text, 'Lines 1 to 2 of the file, each after its line number:\n1: first line\n2: second line');
     assert.deepEqual(text.receipt, { path: 'notes.txt', bytes: 23, lines: 2, shown: { fromLine: 1, toLine: 2 }, truncated: false });
   });
 

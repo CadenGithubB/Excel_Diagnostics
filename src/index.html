@@ -125,13 +125,14 @@
         <span><i class="be"></i>Errors and faults</span><span><i class="bw"></i>Warnings</span><span><i class="bo"></i>Everything else</span>
         <span class="spacer"></span>
         <span class="dim">Drag to zoom in, right-click to zoom out</span>
-        <input id="tFrom" type="text" aria-label="Window start" spellcheck="false">
+        <input id="tFrom" type="text" aria-label="Window start" aria-describedby="tNote" spellcheck="false">
         <span>to</span>
-        <input id="tTo" type="text" aria-label="Window end" spellcheck="false">
+        <input id="tTo" type="text" aria-label="Window end" aria-describedby="tNote" spellcheck="false">
         <span id="tzNote"></span>
         <button id="zoomOut">Zoom out</button>
         <button id="allTime">All time</button>
       </div>
+      <p id="tNote" role="status" hidden></p>
       <div id="hist"></div>
       <div id="histKey" class="histkey" hidden></div>
       <div id="histTip" hidden></div>

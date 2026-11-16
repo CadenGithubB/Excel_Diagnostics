@@ -222,6 +222,70 @@ const old = await shape('Microsoft Excel_2026-03-10-090137_Host.crash', 'Process
 is('an old text crash report: kind, process, time and the thread block it leads with', [old.rep.kind, old.rep.proc, Core.stamp(old.rep.t, 0), old.rep.stack.lines.length], ['Crash', 'Microsoft Excel', '2026-03-10 13:01:37', 2]);
 is('and its timeline line carries the exception and the first lines of that thread', old.inf.reports[0].what,
   'Exception Type: EXC_BAD_ACCESS (SIGSEGV); Crashed Thread: 0 Dispatch queue: com.apple.main-thread; Thread 0 Crashed:: Dispatch queue: com.apple.main-thread: 0 Microsoft Excel 0x0000000104a3c1f0 PivotFilterApply + 532 | 1 Microsoft Excel 0x0000000104a3b9d4 PivotTableUpdate + 96');
+// How many threads and images a text report lists, as a JSON one says: each thread number once (its "name:" line is
+// not another thread), a spindump's thread lines, and the lines under "Binary Images:" up to the next empty line
+const factIn = (rep, label) => (rep.facts.find((f) => f[0] === label) || [])[1];
+is('an old text crash report: the threads it numbers, each once', [factIn(old.rep, 'Threads in the report'), factIn(old.rep, 'Images listed')], ['2', undefined]);
+const listed = await shape('Tool-2026-03-10-090138.crash', 'Process:               Tool [9]\nDate/Time:             2026-03-10 09:01:38.000 -0400\n\nThread 0 name:  Dispatch queue: com.apple.main-thread\nThread 0 Crashed:\n0   Tool   0x1 main + 4\n\nThread 1:\n0   libsystem_kernel.dylib   0x2 mach_msg2_trap + 8\n\nThread 2:\n0   libsystem_kernel.dylib   0x3 __workq_kernreturn + 8\n\n' +
+  'Thread 0 crashed with ARM Thread State (64-bit):\n    x0: 0x0\n\nBinary Images:\n       0x100000000 -        0x100ffffff Tool (1.0) <11111111-2222-3333-4444-555555555555> /Applications/Tool.app/Contents/MacOS/Tool\n       0x1a2b00000 -        0x1a2bfffff libsystem_kernel.dylib (*) <66666666-2222-3333-4444-555555555555> /usr/lib/system/libsystem_kernel.dylib\n\nnot an image\n');
+is('a text crash report: its threads and the images under Binary Images', [factIn(listed.rep, 'Threads in the report'), factIn(listed.rep, 'Images listed')], ['3', '2']);
+const spun = await shape('Microsoft Excel_2026-03-10-090139.hang', 'Date/Time:        2026-03-10 09:01:39.000 -0400\nCommand:          Microsoft Excel\nEvent:            hang\n\nHeaviest stack for the main thread of the target process:\n  10  start + 1 (dyld + 100) [0x1]\n\n' +
+  'Process:          Microsoft Excel [4121]\n  Thread 0x1a2b    DispatchQueue "com.apple.main-thread"(1)    10 samples (1-10)\n  10  start + 1 (dyld + 100) [0x1]\n\n  Thread 0x1a2c    10 samples (1-10)\n  10  thread_start + 8 (libsystem_pthread.dylib + 7704) [0x2]\n\n' +
+  '  Binary Images:\n        0x104a00000 -        0x10bffffff  com.microsoft.Excel 16.114 <11111111-2222-3333-4444-555555555555> /Applications/Microsoft Excel.app/Contents/MacOS/Microsoft Excel\n');
+is('a spindump: its thread lines, and its images under an indented Binary Images', [factIn(spun.rep, 'Threads in the report'), factIn(spun.rep, 'Images listed')], ['2', '1']);
+is('a report that lists neither says neither', [factIn(diag, 'Threads in the report'), factIn(diag, 'Images listed')], [undefined, undefined]);
+// A text report longer than is read is counted in the part read, and its labels say so: they are not the report's own
+const longSpin = await shape('Microsoft Excel_2026-03-10-090140.hang', `Date/Time:        2026-03-10 09:01:40.000 -0400\nCommand:          Microsoft Excel\n\nProcess:          Microsoft Excel [4121]\n${
+  Array.from({ length: 5000 }, (_, i) => `  Thread 0x${(4096 + i).toString(16)}    10 samples (1-10)\n  10  start + 1 (dyld + 100) [0x1] ${'p'.repeat(200)}\n`).join('\n')}\n  Binary Images:\n        0x1 - 0x2  dyld /usr/lib/dyld\n`);
+is('a text report longer than is read: its thread count is of the part read, and no count is said to be the report\'s', [longSpin.rep.read < longSpin.rep.size, Number(factIn(longSpin.rep, 'Threads in the part read')) > 0 && Number(factIn(longSpin.rep, 'Threads in the part read')) < 5000,
+  factIn(longSpin.rep, 'Threads in the report'), factIn(longSpin.rep, 'Images listed')], [true, true, undefined, undefined]);
+// A value nested deeper than can be made into text is left out with its fact, and the rest of the report is read
+const nested = await shape('Weird-2026-03-10-090141.ips', `${head309}{"procName":"Weird","exception":{"type":"EXC_BAD_ACCESS","codes":${'['.repeat(100000)}1${']'.repeat(100000)}}}\n`);
+is('a report with a value nested past what can be written is read without it', [factIn(nested.rep, 'Exception type'), factIn(nested.rep, 'Exception codes')], ['EXC_BAD_ACCESS', undefined]);
+// So is one with such a value anywhere else: in a value that goes into the report's timeline entry (its subtype, type,
+// process name, the largest process of a jetsam report, a termination's indicator) or in its header line. The report
+// keeps its kind, its process and its stack, and is laid out.
+{
+  const deep = (n) => `${'['.repeat(n)}1${']'.repeat(n)}`;
+  const body = (more) => `{"procName":"Deep","exception":{"type":"EXC_BAD_ACCESS","signal":"SIGSEGV"},"faultingThread":0,"threads":[{"triggered":true,"frames":[{"imageIndex":0,"symbol":"deepFrame"}]}],"usedImages":[{"name":"Deep"}]${more}}`;
+  const cases = [['subtype', body(`,"exception":{"type":"EXC_BAD_ACCESS","subtype":${deep(100000)}}`)], ['type', body(`,"exception":{"type":${deep(100000)}}`)],
+    ['procName', body(`,"procName":${deep(50000)}`)], ['indicator', body(`,"termination":{"indicator":${deep(50000)}}`)], ['largestProcess', body(`,"largestProcess":${deep(50000)}`)]];
+  const got = [];
+  for (const [what, text] of cases) {
+    const r = await shape(`Deep${what}-2026-05-01-103000.ips`, head309 + text + '\n');
+    got.push([what, r.inf.reports[0].kind, r.rep ? r.rep.stack && r.rep.stack.frames[0].symbol : 'not laid out', /could not be read/.test(String(r.inf.reports[0].what))]);
+  }
+  is('a report with a deeply nested value anywhere in its body keeps its kind and its stack, and is laid out', got, cases.map(([what]) => [what, 'Crash', 'deepFrame', false]));
+  const header = await shape('DeepHead-2026-05-01-103000.ips', `{"app_name":${deep(50000)},"timestamp":"2026-05-01 10:30:00.00 -0400","bug_type":"309"}\n${body('')}\n`);
+  is('and so does one with such a value in its header line', [header.inf.reports[0].kind, header.rep && header.rep.stack.frames[0].symbol], ['Crash', 'deepFrame']);
+}
+
+// ---------- the shape of a message ----------
+// The rule count by message groups by (Core.messageShape): what changes from run to run is folded into #.
+const shapeOf = Core.messageShape;
+is('numbers, times, dates, versions and addresses are each one #', shapeOf('Excel [4121] at 2026-03-10 10:35:00.123 build 16.114.26030814 via 192.168.1.20:443'), 'Excel [#] at # # build # via #');
+is('hex numbers, with 0x or with a digit among hex letters, are #; hex letters alone are a word', shapeOf('ptr 0x7ff8a3c0 id a3f9c2 0XDEADBEEF cafe added'), 'ptr # id # # cafe added');
+is('a UUID is one #, whatever its groups hold', shapeOf('Request 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 and deadbeef-face-cafe-beef-feedfacecafe done'), 'Request # and # done');
+is('in any other word each run of digits is #', shapeOf('Win32 item17b x86_64 Q1'), 'Win# item#b x#_# Q#');
+is('white space of every kind is one space, with none at either end', shapeOf(' \tfirst\n\n  second third\r\n'), 'first second third');
+is('everything else stays as it is', shapeOf('PivotFilter::Apply failed {"Field":"Region","HRESULT":"0x8007000E"}'), 'PivotFilter::Apply failed {"Field":"Region","HRESULT":"#"}');
+is('two messages that differ only in such parts have one shape', shapeOf('Task <3FA2BC1>.<17> finished in 12 ms') === shapeOf('Task <9C00D>.<4> finished in 1503 ms'), true);
+is('only the first SHAPE_READ characters are read, and a longer message ends in an ellipsis',
+  [Core.SHAPE_READ, shapeOf(`${'a'.repeat(120)}b`), shapeOf('a'.repeat(120)), shapeOf(`${'x'.repeat(119)}\u{1F600}`)], [120, `${'a'.repeat(120)}…`, 'a'.repeat(120), `${'x'.repeat(119)}…`]);
+is('what comes after them changes nothing', shapeOf(`${'w '.repeat(60)}one ending`) === shapeOf(`${'w '.repeat(60)}another ending entirely`), true);
+// Messages written to be slow: long runs a pattern would backtrack over, digits and separators without end, UUID
+// prefixes that never finish. Each is read only to its bound, once.
+{
+  const crafted = ['0'.repeat(10_000_000), '0-'.repeat(5_000_000), '0123abcd-'.repeat(1_000_000), ' '.repeat(10_000_000), 'a'.repeat(10_000_000), '0x'.repeat(5_000_000), '#.'.repeat(5_000_000)];
+  let t0 = performance.now();
+  const shapes = crafted.map(shapeOf), ms = Math.round(performance.now() - t0);
+  is('a message made to be slow is shaped from its first characters, at once', [shapes.every((s, i) => s === `${shapeOf(crafted[i].slice(0, 120))}…`), ms < 500 ? 'at once' : `${ms} ms`], [true, 'at once']);
+  const many = Array.from({ length: 1000 }, (_, i) => `${'0123abcd-'.repeat(13)}${i}`);
+  t0 = performance.now();
+  for (let k = 0; k < 200; k++) for (const m of many) shapeOf(m);
+  const ms2 = Math.round(performance.now() - t0);
+  is('and 200,000 of them, each a run of UUID beginnings, take well under the time a call has', ms2 < 5000 ? 'in time' : `${ms2} ms`, 'in time');
+}
 
 // ---------- facts about the Mac and the collection ----------
 const facts = Object.fromEntries((await ds.facts()).map((f) => [f.label, [f.value, f.path]]));
@@ -250,6 +314,14 @@ is('marks: each report, each Excel process, and install activity, in time order'
 is('marks: without a status file, the macOS log covers from its first entry to its last', marks.cover.unified.map((c) => c.map((t) => Core.stamp(t, 0))), [['2026-03-10 13:00:00', '2026-03-10 13:00:05']]);
 is("marks: Excel's own logs cover from their first entry to their last", marks.cover.office.map((c) => c.map((t) => Core.stamp(t, 0))), [['2026-03-10 13:00:00', '2026-03-10 13:00:06']]);
 is('marks: no sleep is recorded with a length, so none is drawn', marks.asleep, []);
+// each Excel process ID's mark carries the ID and the time of its last entry, for the command-line tool's summary
+is('marks: each Excel process ID with its first and last entry in the macOS and Excel logs', marks.marks.filter((m) => m.kind === 'excel').map((m) => [m.pid, Core.stamp(m.t, 0), Core.stamp(m.t1, 0)]),
+  [[4121, '2026-03-10 13:00:00', '2026-03-10 13:00:04'], [4307, '2026-03-10 13:00:05', '2026-03-10 13:00:06']]);
+is('marks: no more Excel process IDs than are followed, so none is said to be left out', marks.excelPidsCut, false);
+const pids = new Core.Dataset(), pidRow = (i) => `2026-03-10 09:00:00.000000-0400\t2026-03-10 13:00:00.000000\tDefault\tMicrosoft Excel\t${1000 + i}\tAppKit\t\t\texcel\trun ${i}`;
+await pids.load([{ path: 'p/unified_logs/2026-03-10.tsv', blob: new Blob([[UNIFIED.split('\n')[0], ...Array.from({ length: 501 }, (_, i) => pidRow(i))].join('\n') + '\n']) }], quiet);
+const pidMarks = await pids.marks();
+is('marks: past 500 Excel process IDs the rest are not followed, and that is said', [pidMarks.marks.filter((m) => m.kind === 'excel').length, pidMarks.excelPidsCut], [500, true]);
 const cover = async (status, sleep, oneDay) => {
   const d = new Core.Dataset();
   const inf = await d.load([{ path: 'c/unified_logs/2026-03-09.tsv', blob: new Blob([UNIFIED.replace(/2026-03-10 09:/g, '2026-03-09 21:').replace(/2026-03-10 13:/g, '2026-03-10 01:')]) },
@@ -294,13 +366,173 @@ await sampleSet.load(Core.sampleBundle(1), quiet);
 is('sample: facts come from bundle_info.tsv where it has them', (await sampleSet.facts()).filter((x) => x.path === 'bundle_info.tsv').map((x) => [x.label, x.value]), [
   ['Collected', '2026-03-10 12:03:40 EDT (2026-03-10 16:03:40 UTC)'], ['Collector mode', 'collect'], ['Collector version', '1.5.0'], ['macOS', '15.7.8 (24G824)'], ['Mac', 'MacBook Pro (MacBookPro18,1)'],
   ['Processor', 'Apple M1 Pro'], ['Memory installed', '16 GB'], ['Excel', '16.114 (16.114.26030814)']]);
+// whether a process of the console user's ran Excel when the collector started, as bundle_info.tsv records it
+const ran = new Core.Dataset();
+await ran.load([{ path: 'r/bundle_info.tsv', blob: new Blob(['collector_version\t1.5.0\nmode\thang\nexcel_version\tnot found in /Applications\nexcel_running\tno\n']) }, { path: 'r/manifest.tsv', blob: new Blob(['component\tstatus\tdetails\n']) }], quiet);
+is('facts: Excel as bundle_info.tsv records it, and whether it was running when the collector started', (await ran.facts()).filter((x) => x.label.startsWith('Excel')).map((x) => [x.label, x.value, x.path]),
+  [['Excel', 'not found in /Applications', 'bundle_info.tsv'], ['Excel running when the collector started', 'no', 'bundle_info.tsv']]);
+
+// which collector wrote case/incident_context.md: the engine tells it, for the page, the text commands and request mode
+const caseOld = '# Incident context\n\n- Collected: 2026-03-10 09:00:00 EDT\n- Case: pivot-filter\n\n## Reported behavior\n\nExcel crashes when a user filters within a PivotTable.\n';
+const caseGiven = '# Incident context\n\n- Collector started: 2026-03-10 09:00:00 EDT\n\n## What happened, as typed by whoever ran the collector\n\n    - Case: it closed\n';
+is('case file: an older collector\'s, this collector\'s (whatever the typed line says), and any other', typeof Core.contextKind === 'function' ? [Core.contextKind(caseOld), Core.contextKind(caseGiven), Core.contextKind('notes')] : 'the engine has no contextKind', ['old', 'given', 'other']);
+// A file with this collector's opening and an older heading was written as neither writes it: the older wording in it is
+// said of as in any other file, with a sentence that it has both; and "- Collector started:" makes a file this
+// collector's only as its third line, after the title and a blank line, as this collector writes it
+is('case file: one with this collector\'s opening and an older heading has the older wording', Core.contextKind('# Incident context\n\n- Collector started: 2026-03-10 09:00:00 EDT\n\n## Reported behavior\n\nanything at all\n'), 'old');
+is('case file: "- Collector started:" as the last line of an older collector\'s file does not make it this collector\'s',
+  [Core.contextKind(`${caseOld}- Collector started: 2026-03-20 10:00:00 EDT\n`), Core.contextRead(`${caseOld}- Collector started: 2026-03-20 10:00:00 EDT\n`).said.length > 1, Core.contextRead(`${caseOld}- Collector started: 2026-03-20 10:00:00 EDT\n`).both],
+  ['old', true, undefined]);
+is('case file: an older path written with a line break holds the line, and the file is still the older collector\'s',
+  Core.contextKind('# Incident context\n\n- Collected: 2026-03-20 10:00:00 EDT\n- Case: pivot-filter\n- Workbook provided: /Volumes/Share/a\n- Collector started: b.xlsx\n\n## Reported behavior\n\nExcel crashes when a user filters within a PivotTable.\n'), 'old');
+// what the page, the text commands and request mode say of it: the text under a heading is called the older
+// collector's only when it is word for word what that collector wrote there, and nothing of the file is in a sentence
+{
+  const typed = caseOld.replace('Excel crashes when a user filters within a PivotTable.', 'It closed when I sorted <b>column C</b>');
+  const [exact, other, given, none] = [caseOld, typed, caseGiven, 'notes'].map((t) => Core.contextRead(t));
+  is('case file: the kinds contextRead gives', [exact.kind, other.kind, given.kind, none.kind, Core.contextRead('## Reported behavior\n\nsomething else\n').kind], ['old', 'old', 'given', 'other', 'other']);
+  is('case file: the text under a heading, word for word', exact.said[1], 'The text under "Reported behavior" in this file is word for word what collectors before 1.5.0 wrote there for the case pivot-filter.');
+  is('case file: other text under the same heading', other.said[1], 'This file has the heading "Reported behavior", which collectors before 1.5.0 wrote for the case pivot-filter, and the text under it here is not what they wrote there.');
+  is('case file: nothing of the file is in what is said', [exact, other, given, none].some((r) => r.said.some((s) => /column C|<b>/.test(s))), false);
+}
+
+// a search's terms, counted as the search reads them: a phrase is one, and so are a /regex/, a field and an exclusion
+is('query terms: words, a phrase, a regex, a field and an exclusion', [Core.queryTerms('pivot "a b c d" /x+y/ process:"Microsoft Excel" -kernel'), Core.queryTerms(''), Core.queryTerms('  a   b  ')], [5, 0, 2]);
+is('query terms: a phrase of a hundred and fifty words is one term', Core.queryTerms(`"${'w '.repeat(150).trim()}"`), 1);
+// A /regex/ is read by the engine's own reader (rxCompile), which follows every way of matching at once. It must
+// say what JavaScript's own reader says of whether a pattern matches a line, for every pattern it reads: checked on
+// patterns and lines made up from a fixed seed (old forms such as \8, \01 and x{ among them), so a slip shows as the
+// pattern, the flags and the line it was found on. Where a match starts is checked the same way.
+{
+  let seed = 7;
+  const rnd = () => { seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const pick = (a) => a[Math.floor(rnd() * a.length)];
+  const ATOMS = ['a', 'b', 'A', '.', '\\d', '\\w', '\\s', '\\W', '[ab]', '[^a]', '[a-c]', '\\n', ' ', '-', 'é', 'É', 'K', 'k', '\\x41', '\\u0062', '[\\d-]', '[\\W]', '[^\\d]',
+    '[à-ÿ]', '\\cJ', '[\\b]', '\\0', '_', '1', '\\B', '\\b', '^', '$', 'x{', '\\8', '\\01', '(?i:a)', '(?-i:[a-c])', '(?m:^)', '(?s:.)'];
+  const gen = (d) => {
+    const r = rnd();
+    if (d > 3 || r < 0.35) return pick(ATOMS);
+    if (r < 0.5) return gen(d + 1) + gen(d + 1);
+    if (r < 0.6) return `${gen(d + 1)}|${gen(d + 1)}`;
+    if (r < 0.7) return `(${gen(d + 1)})`;
+    if (r < 0.75) return `(?:${gen(d + 1)})`;
+    const a = gen(d + 1);
+    return /^(\^|\$|\\b|\\B)$/.test(a) ? a : `(${a})${pick(['*', '+', '?', '{2}', '{1,3}', '{0,2}', '{2,}', '*?', '+?', '??', '{1,2}?'])}`;
+  };
+  const CH = ['a', 'b', 'A', 'B', 'k', 'K', '1', ' ', '\n', '\r', ' ', '-', '_', 'é', 'É', 'x', '{', '\b', '8', '\x01', 'ÿ', 'Ÿ', 'µ', 'μ', '\\'];
+  let tried = 0, differ = null, starts = null, ends = null;
+  for (let k = 0; k < 4000 && !differ; k++) {
+    const src = gen(0), flags = pick(['', 'i', 'm', 'mi']);
+    let re;
+    try { re = new RegExp(src, flags); } catch (e) { continue; }
+    const rx = Core.rxCompile(src, flags);
+    if (rx.why) continue;
+    for (let t = 0; t < 6; t++) {
+      let line = '';
+      for (let j = Math.floor(rnd() * 9); j > 0; j--) line += pick(CH);
+      tried++;
+      if (re.test(line) !== rx.test(line, 0, line.length)) { differ = [src, flags, line, re.test(line)]; break; }
+      const m = re.exec(line), at = rx.find(line, 0);
+      if (!starts && (m ? m.index : null) !== (at ? at[0] : null)) starts = [src, flags, line, m && m.index];
+      if (!ends && JSON.stringify(m ? [m.index, m.index + m[0].length] : null) !== JSON.stringify(at)) ends = [src, flags, line, m && [m.index, m.index + m[0].length], at];
+    }
+  }
+  is('the reader says what JavaScript says of whether each pattern matches each line', differ, null);
+  is('and a match starts where JavaScript\'s does', starts, null);
+  is('and ends where JavaScript\'s does', ends, null);
+  is('and that was checked on many lines', tried > 15000, true);
+  // a part of a line on its own: ^ and $ hold at its ends, and \b looks at nothing outside it
+  const part = (src, flags, s, a, b) => Core.rxCompile(src, flags).test(s, a, b);
+  is('a part of a line is read as a line of its own', [part('^b', 'm', 'ab', 1, 2), part('a$', 'm', 'ab', 0, 1), part('\\bb', 'm', 'ab', 1, 2), part('ab', 'm', 'ab', 1, 2)], [true, true, true, false]);
+  // a match on the page: from the place asked, and as JavaScript ends it where no repeated part can match nothing
+  const finds = (src, flags, s) => { const rx = Core.rxCompile(src, flags), out = []; for (let at = 0, m; at <= s.length && (m = rx.find(s, at)); at = m[1] > m[0] ? m[1] : m[1] + 1) out.push(m); return out; };
+  is('each match is found in turn, as JavaScript finds them', [finds('a+', '', 'xaaybaz'), finds('pivot', 'i', 'A Pivot, a PIVOT'), finds('(ab|a)c', '', 'abcac')], [[[1, 3], [5, 6]], [[2, 7], [11, 16]], [[0, 3], [3, 5]]]);
+  is('a match that would take more threads than asked for is not given', Core.rxCompile('(a|b)*c', '').find('ab'.repeat(500), 0, 100), null);
+  // JavaScript takes no copy of a repeated part, past the smaller count, that matches nothing: a part that tries
+  // matching nothing first then matches what it can, and a match is marked where JavaScript marks it
+  const jsFinds = (src, flags, s) => [...s.matchAll(new RegExp(src, `g${flags}`))].map((m) => [m.index, m.index + m[0].length]);
+  const row = 'PivotCache::Refresh {"Workbook":"Q1 Forecast.xlsx","Records":1977}';
+  is('a repeated part that tries matching nothing first is found as JavaScript finds it', ['(?:|[a-z]){1,9}', '(?:|\\S){1,9}', '(?:()|\\w){0,5}', '(?:|[a-z]){0,3}', '(?:\\b|[a-z])+', '(?:|r|e)*f', '(a*)*b', '((?:|x)*)+Q']
+    .map((p) => [p, JSON.stringify(finds(p, 'i', row)) === JSON.stringify(jsFinds(p, 'i', row))]).filter(([, same]) => !same), []);
+  is('and the first match on that line is the one JavaScript gives', finds('(?:|[a-z]){1,9}', 'i', row)[0], [0, 8]);
+}
+// What the reader does is bounded by what it looks at: find() counts each place in the pattern it looks at, at each
+// place in the line, so a pattern of many optional parts and assertions cannot keep the page busy on a long entry, and
+// the places a match can start from are worked out once, not at each code unit
+{
+  const words = 'lorem ipsum dolor sit amet consectetur '.repeat(51283).slice(0, 2e6);
+  // after each letter, 350 places of \B or $x are looked at before the one thread that comes out of them
+  const heavy = Core.rxCompile('[a-z](?:\\B|$x){350}Q', 'i'), t0 = Date.now(), none = heavy.find(words, 0, 2e6), took = Date.now() - t0;
+  is('a pattern whose every step looks at hundreds of others stops at its budget, counted in what it looks at, and soon', [none, heavy.steps >= 2e6 && heavy.steps < 2e6 + 5000, took < 1500], [null, true, true]);
+  const late = Core.rxCompile('(?:\\Bx?){600}Q', 'i'), t1 = Date.now(), last = late.find(`${words}Q`, 0);
+  is('a match at the end of 2,000,000 characters, past hundreds of optional parts at each place, is found soon', [last, Date.now() - t1 < 1500], [[2e6, 2e6 + 1], true]);
+  let seed = 3, ab = '';
+  for (let k = 0; k < 2e6; k++) { seed = (seed * 1103515245 + 12345) & 0x7fffffff; ab += seed & 0x10000 ? 'a' : 'b'; }
+  const many = Core.rxCompile('(?:x?){900}(?:a|b)*a(?:a|b){20}Z', 'mi'), t2 = Date.now();
+  is('a line that keeps the reader meeting new states is read without the whole pattern again at each code unit', [many.test(ab, 0, ab.length), Date.now() - t2 < 3000], [false, true]);
+}
+// Left out with a note that names the pattern: a look-ahead or look-behind and a back-reference, which the reader does
+// not read, and a pattern that is more than RX_MOST steps long once each counted repeat is written out
+{
+  const ds = new Core.Dataset(), notes = (q) => ds.compile(q, false).notes.map((n) => n.text);
+  is('a look-ahead is left out, and the note names it', notes('/a(?=b)/ pivot'), ['/a(?=b)/ has a look-ahead or a look-behind, which this search does not read, so it was left out of the search. Write it without (?=, (?!, (?<= or (?<!, or search for its words in quotation marks.']);
+  is('and only that term is: the other is still searched for', ds.compile('/a(?=b)/ pivot', false).text.length, 1);
+  is('so is every other look-around', ['/(?<=a)b/', '/(?<!a)b/', '/a(?!b)/'].map((q) => notes(q).length), [1, 1, 1]);
+  is('a back-reference is left out', notes('/(a)\\1/'), ['/(a)\\1/ has a back-reference, which this search does not read, so it was left out of the search. Write it without \\1 or \\k<name>, or search for its words in quotation marks.']);
+  is('so is one by name', notes('/(?<x>a)\\k<x>/').length, 1);
+  is('a number past the groups is a character, not a back-reference, as JavaScript reads it', ['/(a)\\2/', '/\\8/', '/\\1/', '/\\k/'].map((q) => notes(q).length), [0, 0, 0, 0]);
+  const BIG = `is longer than this search reads: it comes to more than ${Core.RX_MOST} steps as this search counts them, so it was left out of the search. A counted repeat such as x{2,30} counts as 30 copies of x, and each | and each copy that may be left out counts more.`;
+  is('a pattern too long as the search counts its steps is left out, and the note says how they are counted', notes('/(a+){1,99999}z/'), [`/(a+){1,99999}z/ ${BIG} Write it shorter, or with smaller counts.`]);
+  is('and one within that is searched for', [notes('/(a{1,30}){1,30}z/'), ds.compile('/(a{1,30}){1,30}z/', false).text.length], [[], 1]);
+  // the count as the note gives it: x{2,30} is 30 copies of x and 28 that may be left out, 58 steps, so 34 of them
+  // (1,972) are searched and 35 (2,030) are not; each | counts two more, so 500 words of two letters (1,998) are
+  // searched and 501 (2,002) are not, and a pattern with no count is not told to use smaller counts
+  const alts = (n) => `/${Array.from({ length: n }, (_, k) => String.fromCharCode(97 + (k % 26)) + String.fromCharCode(97 + Math.floor(k / 26))).join('|')}/`;
+  is('the steps of a counted repeat and of each |, as the note counts them', [notes('/(?:x{2,30}){34}/').length, notes('/(?:x{2,30}){35}/').length, notes(alts(500)).length, notes(alts(501)).length], [0, 1, 0, 1]);
+  is('a pattern with no count is told to be shorter, and only so much of it is said back that the note is read to its end',
+    notes(alts(501)), [`${alts(501).slice(0, 201)}\u2026/ ${BIG} Write it shorter.`]);
+  is('/error.{0,990}failed/ is searched for, and /error.{0,999}failed/ (2,009 steps as the note counts them) is not', [notes('/error.{0,990}failed/').length, notes('/error.{0,999}failed/').length], [0, 1]);
+  // A repeated part that can only match nothing is read as JavaScript reads it, however large its count: once, or as
+  // nothing when it may be left out, and at once. Before, its count was written out, or multiplied by nothing.
+  {
+    const lines = ['abc', 'ba', 'xy', ''], t0 = Date.now();
+    const got = ['(?:){2147483647}', '(?:x{0}){99999999999}', '(?:(?:){2147483647}){2147483646}', '(?:){2147483646}', '(?:\\b){2147483647}a', 'x(?:\\b|^){0,9999999}y'].map((p) => {
+      const rx = Core.rxCompile(p, 'm');
+      return rx.why || lines.every((l) => rx.test(l, 0, l.length) === new RegExp(p, 'm').test(l));
+    });
+    is('a repeated part that can only match nothing is read at once, however many times it repeats, as JavaScript reads it', [got, Date.now() - t0 < 2000], [[true, true, true, true, true, true], true]);
+    // and one that is never written out does not hide a part past the limit after it
+    const t1 = Date.now(), hid = Core.rxCompile('(?:(?:){2147483647}){0}(?:(?:a{1000}){1000}){2}', 'mi');
+    is('a part that can only match nothing, with a count of no limit, does not let a pattern past the limit be read', [hid.why, Date.now() - t1 < 1000], ['big', true]);
+    is('and such a search says so', notes('/(?:(?:){2147483647}){0}(?:(?:a{1000}){1000}){2}/').map((n) => n.includes(BIG)), [true]);
+  }
+  // A count of more digits than JavaScript keeps is read as JavaScript reads it, with no limit, however far its brace is
+  const huge = Core.rxCompile(`(a+){1,${'9'.repeat(45)}}z`, 'm');
+  is('a count of 45 digits is read as no limit, as JavaScript reads it', [huge.why, huge.test('aaz', 0, 3), new RegExp(`(a+){1,${'9'.repeat(45)}}z`).test('aaz')], [undefined, true, true]);
+  is('groups inside groups deeper than the reader goes are left out with a note', notes(`/${'('.repeat(20000)}a${')'.repeat(20000)}/`), [`/${'('.repeat(200)}\u2026/ has groups inside groups deeper than this search reads, so it was left out of the search. Write it with fewer groups.`]);
+}
+
 const sampleMarks = await sampleSet.marks();
 is('sample: marks', sampleMarks.marks.map((m) => [Core.stamp(m.t, 0), m.kind]), [['2026-03-10 13:00:00', 'excel'], ['2026-03-10 14:32:30', 'report'], ['2026-03-10 14:35:00', 'report'], ['2026-03-10 14:35:00', 'excel'], ['2026-03-10 16:03:40', 'collected']]);
 is('sample: the macOS log covers its day up to the collection, and one sleep is recorded with its length',
   [sampleMarks.cover.unified.map((c) => c.map((t) => Core.stamp(t, 0))), sampleMarks.asleep.map((c) => c.map((t) => Core.stamp(t, 0)))], [[['2026-03-10 13:00:00', '2026-03-10 16:03:40']], [['2026-03-10 15:50:00', '2026-03-10 15:59:00']]]);
 is('coverage: each Excel process once, a restart, and the collection are marked', done.kinds, 'excel excel power collected');
 const cut = await cover('Date | Status\n2026-03-09 | ok (6 entries)\n2026-03-10 | hit the 3-minute limit, partial (6 entries; rerun with a larger --max-wait for the rest)\n', sleeps);
-is('coverage: a day cut short is covered only as far as its entries go', cut.unified, [['2026-03-10 01:00:00', '2026-03-10 04:00:00'], ['2026-03-10 13:00:00', '2026-03-10 13:00:05']]);
+// the day before it was searched to its end: it is covered to the last millisecond before the next day starts, which
+// belongs to that next day (the macOS log of 2026-03-10 starts at 04:00:00 UTC on this clock)
+is('coverage: a day cut short is covered only as far as its entries go', cut.unified, [['2026-03-10 01:00:00', '2026-03-10 03:59:59'], ['2026-03-10 13:00:00', '2026-03-10 13:00:05']]);
+const dayDone = new Core.Dataset();
+await dayDone.load([{ path: 'c/unified_logs/2026-03-09.tsv', blob: new Blob([UNIFIED.replace(/2026-03-10 09:/g, '2026-03-09 21:').replace(/2026-03-10 13:/g, '2026-03-10 01:')]) },
+  { path: 'c/unified_logs/collection_status.txt', blob: new Blob(['Date | Status\n2026-03-09 | ok (6 entries)\n']) }, { path: 'c/summary.md', blob: new Blob(['- Collected: 2026-03-10 12:00:00 EDT\n']) }], quiet);
+is('coverage: a day searched to its end ends a millisecond before the next day', Core.stamp((await dayDone.marks()).cover.unified[0][1], 3), '2026-03-10 03:59:59.999');
+// The status file is read to its first MB, as the command-line tool reads it, each line whole whatever it holds: a day
+// past its first 64 KB, or one whose line holds a line separator, is still a day searched to its end
+for (const [what, line] of [['past the first 64 KB of the file', '2026-03-09 | ok (6 entries)'], ['with a line separator in its line', '2026-03-09 | ok (6 entries)\u2028and more']]) {
+  const far = new Core.Dataset();
+  await far.load([{ path: 'c/unified_logs/2026-03-09.tsv', blob: new Blob([UNIFIED.replace(/2026-03-10 09:/g, '2026-03-09 21:').replace(/2026-03-10 13:/g, '2026-03-10 01:')]) },
+    { path: 'c/unified_logs/collection_status.txt', blob: new Blob([`Date | Status\n${'access check | skipped: made up\n'.repeat(what.startsWith('past') ? 3000 : 1)}${line}\n`]) }, { path: 'c/summary.md', blob: new Blob(['- Collected: 2026-03-10 12:00:00 EDT\n']) }], quiet);
+  is(`coverage: a day searched to its end ${what}`, Core.stamp((await far.marks()).cover.unified[0][1], 3), '2026-03-10 03:59:59.999');
+}
 
 // ---------- moving around the list ----------
 is('seek: first entry at or after a time', ds.seek(at(13, 0, 2)), 7);
@@ -350,6 +582,30 @@ is('choosing two tags shows entries with either', await count({ facets: { tag: {
 is('a filter and a word together', await count({ text: 'pivot', facets: { group: { inc: [unifiedGroup] } } }), 2);
 is('levels as the logs name them', names('lvl', (await ds.query({ bins: 6 }, quiet)).facets.lvl.values.map(([v]) => v)).sort(),
   ['', 'Crash', 'Debug', 'Default', 'Diag', 'Error', 'Fault', 'Force quit', 'Info', 'Jetsam', 'Medium', 'Monitorable', 'Unexpected', 'Warning']);
+
+// A word or a /regex/ is matched with the text of each entry as it is shown (UTF-8, without the line end at its end),
+// so letters past ASCII, ., [é] and capitals ignored are as JavaScript has them on that text, and an entry of Excel's
+// own log (CRLF line ends) is not blank to /^$/. Checked against JavaScript on the text readRows() gives each entry.
+{
+  const utf8 = (t) => new TextEncoder().encode(t), cut = new Uint8Array([0x63, 0x61, 0x66, 0xc3]);       // "caf" and half of an é
+  const line = (k, m) => utf8(`2026-03-10 09:00:${String(k).padStart(2, '0')}.000000-0400\t2026-03-10 13:00:${String(k).padStart(2, '0')}.000000\tDefault\tMicrosoft Excel\t4121\tAppKit\tcom.apple.AppKit\tWindow\texcel\t${m}`);
+  const msgs = ['café', 'naïve résumé', 'CAFÉ', 'Straße geöffnet', 'ÿ Ÿ', 'Æsir æ', 'Ìsland', 'Úrsula', 'Ünder', 'plain ascii', 'žluť Š', 'emoji \u{1F600} here', 'œuvre Œ'];
+  const parts = [utf8('local_time\tutc_time\tlevel\tprocess\tpid\tsender\tsubsystem\tcategory\ttags\tmessage\n')];
+  msgs.forEach((m, k) => parts.push(line(k, m), utf8('\n')));
+  parts.push(line(msgs.length, ''), cut, utf8('\n'));
+  const wideSet = new Core.Dataset();
+  const wideInfo = await wideSet.load([{ path: 'w/unified_logs/2026-03-10.tsv', blob: new Blob(parts) }, { path: 'w/office/excel_container_logs/Diagnostics/EXCEL/Primary1.log', blob: new Blob([EXCEL]) }], quiet);
+  const shown = (await wideSet.readRows(Array.from({ length: wideInfo.total }, (_, k) => k), 1 << 20)).map((x) => x.raw);
+  const terms = ['/caf.$/', '/r.sum.$/', 'CAFÉ', '/[é]/', '/Ü/', 'Ü', '/Ê/', 'ü', 'š', 'œ', '/\u{1F600}/', '/\\uD83D/', 'é', 'Straße', '/straSSe/', '/caf\uFFFD/', '/^$/', '/^\\s*$/', '/^.{0,3}$/', '/\\r/', '/slow\\t$/', '"failed\t"'];
+  const js = (t, cs) => { const m = /^\/(.*)\/$/.exec(t), src = m ? m[1] : t.replace(/^"|"$/g, '').replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&'); const re = new RegExp(src, cs ? 'm' : 'mi'); return shown.filter((x) => re.test(x)).length; };
+  const differ = [];
+  for (const cs of [false, true]) for (const t of terms) { const [got, want] = [(await wideSet.query({ bins: 6, text: t, cs }, quiet)).count, js(t, cs)]; if (got !== want) differ.push([t, cs, got, want]); }
+  is('each word and /regex/ matches the entries JavaScript matches on their text as shown', differ, []);
+  const counts = [];
+  for (const t of ['/caf.$/', 'CAFÉ', '/[é]/', 'Ü', '/Ê/', 'œ', '/caf\uFFFD/', '/^$/', '/^\\s*$/', '/\\r/', '/slow\\t$/']) counts.push((await wideSet.query({ bins: 6, text: t }, quiet)).count);
+  is('and those are the ones written for it (/caf.$/ also matches the entry cut in the middle of an é, as it is shown)', counts, [3, 2, 3, 1, 0, 1, 1, 0, 0, 0, 1]);
+  is('and a word left out is left out of the same entries', (await wideSet.query({ bins: 6, text: '-é' }, quiet)).count, wideInfo.total - js('é', false));
+}
 
 // ---------- what the engine says about search text that looks like a slip ----------
 const said = async (text) => (await ds.query({ bins: 6, text }, quiet)).notes.map((n) => n.text).join(' | ');
@@ -513,6 +769,38 @@ const forged = '{"app_name":"Microsoft Excel\\n2026-03-10 13:00:00.000\\tCrash\\
 [pd, pinfo] = await opened(variant({ 'reports/user_Library_Logs_DiagnosticReports/Forged-2026-03-10-090140.ips': forged }));
 is('a report whose process name holds a line break and tabs adds one row, its own', [pinfo.reports.length - info.reports.length, pinfo.total, pinfo.reports.every((r) => r.pos !== undefined)], [1, 19, true]);
 is('and that row is tied to the report that made it', pinfo.reports.filter((r) => /Forged/.test(r.path)).map((r) => pd.g.R[r.pos] === pinfo.reports.indexOf(r)), [true]);
+
+// Patterns that took JavaScript's own reader longer than anyone would wait, each searched in entries made to slow it:
+// one of 60 a's, rows of 20,000 spaces, and 2,000 short ones. Each is searched (not left out), finds what it matches,
+// and all of them together answer at once. (With JavaScript's own reader, this test would not finish.)
+const slowRow = (msg) => `2026-03-10 09:00:04.000000-0400\t2026-03-10 13:00:04.000000\tDefault\tMicrosoft Excel\t4121\tAppKit\t\t\texcel\t${msg}\n`;
+const [slowDs] = await opened(variant({ 'unified_logs/2026-03-10.tsv': HEADER + slowRow(`pivot refresh ${'a'.repeat(60)} end`) + slowRow('x' + ' '.repeat(20000) + 'y').repeat(100) + slowRow('pivot short line').repeat(2000) }));
+const SLOW = ['(a|aa)+z', '(a|a)*z', '(?:a|a)*z', '(a|a)+?z', '(\\w|a)+z', '(a{1,30}){1,30}z', '([\\s\\S]*?){20}z', '(.*){12}z', '(a+){2,30}z', '(a+){1,99999999999999999999999999999999999999999}z',
+  '(\\w+\\s?){1,30}$', '\\s+$', '\\s+y\\s+z', '[\\s\\S]*zq', 'a*a*a*a*a*a*a*a*a*z', '(a+)+z', '(.*){12}\\x01', '(\\w+\\s?){1,20}x', '(a|aa)+ end'];
+const [slowMs, slowGot] = await timed(async () => { const out = []; for (const p of SLOW) { const r = await slowDs.query({ bins: 6, text: `source:2026-03-10.tsv /${p}/` }, quiet); out.push([r.count, r.notes.length]); } return out; });
+is('patterns that stalled JavaScript\'s reader are searched, each with what it matches and no note', slowGot,
+  SLOW.map((p) => [/^\(\\w\+\\s\?\)/.test(p) ? 2101 : p === '(a|aa)+ end' ? 1 : 0, 0]));       // every row of the file ends in a word and holds excel, with an x
+is('and all of them together answer within three seconds', [slowMs < 3000, slowMs], [true, slowMs]);
+// a /regex/ is read in one entry at a time: nothing it matches runs from one entry into the next
+is('a /regex/ does not match across two entries', [(await slowDs.query({ bins: 6, text: '/end[\\s\\S]*x {20}/' }, quiet)).count, (await slowDs.query({ bins: 6, text: '/x {20}/' }, quiet)).count], [0, 100]);
+
+// A force-quit file can hold more than one ForceQuitDate: each entry says which of them it is, so that none but the
+// latest is called the latest, and a file of one says it holds one
+{
+  const FQ = 'reports/CrashReporter/Microsoft Excel_0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0.txt';
+  const said = async (text) => { const [d] = await opened(variant({ [FQ]: text })); await d.query({ bins: 6, text: 'force-quit' }, quiet); return (await d.rows(0, 50)).map((r) => [Core.stamp(r[1], 0), r[9]]); };
+  is('a force-quit file of two dates: each entry says which of the two it is', await said('{\n  "ForceQuitDate" => 2026-03-10 10:50:00 -0400\n  "ForceQuitDate" => 2026-03-10 08:10:00 -0400\n}\n'),
+    [['2026-03-10 12:10:00', 'Force quit: Microsoft Excel_0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0.txt - one of the 2 force-quit times this file records'],
+      ['2026-03-10 14:50:00', 'Force quit: Microsoft Excel_0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0.txt - the latest of the 2 force-quit times this file records']]);
+  is('a force-quit file of one date says it holds one', (await said(FILES[FQ])).map((r) => r[1]), ['Force quit: Microsoft Excel_0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0.txt - the one force-quit time this file records']);
+  // Only the start of a long file is read: what is said of it is said of that part, as the file can hold more past it
+  const long = `{\n  "ForceQuitDate" => 2026-03-10 08:10:00 -0400\n${'  "Other" => 0\n'.repeat(5000)}  "ForceQuitDate" => 2026-03-10 10:50:00 -0400\n}\n`;
+  is('a force-quit file longer than the part read: each entry is said of the part read, never of the whole file', await said(long),
+    [['2026-03-10 12:10:00', 'Force quit: Microsoft Excel_0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0.txt - the one force-quit time in the first 65,536 bytes of this file']]);
+  const twoIn = `{\n  "ForceQuitDate" => 2026-03-10 08:10:00 -0400\n  "ForceQuitDate" => 2026-03-10 08:20:00 -0400\n${'  "Other" => 0\n'.repeat(5000)}}\n`;
+  is('and of two in that part, the later is the latest of those two', (await said(twoIn)).map((r) => r[1].replace(/^.* - /, '')),
+    ['one of the 2 force-quit times in the first 65,536 bytes of this file', 'the latest of the 2 force-quit times in the first 65,536 bytes of this file']);
+}
 
 // small files made to be slow are not slow
 let ms;
@@ -796,6 +1084,33 @@ is('the reader used here does read a quoted cell across line ends', readBack('a\
   const lying = new Core.Dataset(), linfo = await lying.load([{ path: 'lying.zip', blob: new Blob([bytes]) }], quiet);
   const took = performance.now() - t0;
   is('a zip whose members claim 4 GB each opens without sizing room from the claim', [linfo.total, took < 5000 ? 'in time' : `${Math.round(took)} ms`], [2000, 'in time']);
+}
+
+// ---------- the parts of a written time that cannot be ----------
+// Core.timeBad is what the command-line tool and the page's From and To boxes both check a time by. Each part that
+// cannot be is said, in the order the parts are written; a part that can be is not. Left to Date, any of these would
+// be rolled over into another time.
+{
+  const bad = (p) => { try { return Core.timeBad(p); } catch (e) { return `threw: ${e.message}`; } };
+  const said = (p) => { const r = bad(p); return typeof r === 'string' ? r : r.bad; };
+  is('a month and a day that cannot be: both said', said({ y: '2026', mo: '13', d: '45', h: '10', mi: '00' }),
+    ['the month is 13, and months run from 01 to 12', 'the day is 45, and no month has more than 31 days']);
+  is('a day the month does not have', said({ y: '2026', mo: '02', d: '30', h: '10', mi: '00' }), ['the day is 30, and February 2026 has days 01 to 28']);
+  is('29 February in a year that has it, and in one that does not', [said({ y: '2028', mo: '02', d: '29' }), said({ y: '2026', mo: '02', d: '29' }), said({ y: '1900', mo: '02', d: '29' }), said({ y: '2000', mo: '02', d: '29' })],
+    [[], ['the day is 29, and February 2026 has days 01 to 28'], ['the day is 29, and February 1900 has days 01 to 28'], []]);
+  is('month 00 and day 00', said({ y: '2026', mo: '00', d: '00' }), ['the month is 00, and months run from 01 to 12', 'the day is 00, and days run from 01']);
+  is('hour 24, minute 60 and second 99, each said', said({ y: '2026', mo: '03', d: '10', h: '24', mi: '60', s: '99' }),
+    ['the hour is 24, and hours run from 00 to 23', 'the minute is 60, and minutes run from 00 to 59', 'the second is 99, and seconds run from 00 to 59']);
+  is('the second 60 cannot be either', said({ y: '2026', mo: '03', d: '10', h: '09', mi: '00', s: '60' }), ['the second is 60, and seconds run from 00 to 59']);
+  is('a time of day alone is checked as a time of day', said({ h: '10', mi: '99' }), ['the minute is 99, and minutes run from 00 to 59']);
+  is('the highest parts that can be', said({ y: '9999', mo: '12', d: '31', h: '23', mi: '59', s: '59', z: '+14:00' }), []);
+  is('offsets from -12:00 to +14:00, with minutes from 00 to 59', ['+14:00', '-12:00', '+0530', 'Z', 'utc', '+14:01', '-12:30', '+25:00', '+0575'].map((z) => bad({ h: '10', mi: '00', z }).zoneBad),
+    [false, false, false, false, false, true, true, true, true]);
+  is('an offset that cannot be is said', said({ y: '2026', mo: '03', d: '10', h: '10', mi: '00', z: '-13:00' }), ['the offset is -13:00, and offsets run from -12:00 to +14:00, with minutes from 00 to 59']);
+  const days = (y, mo) => { try { return Core.daysIn(y, mo); } catch (e) { return `threw: ${e.message}`; } };
+  // the year 0 is a leap year and 1900 is not: a reader that took 0 for 1900, as Date.UTC does, would say 28
+  is('the days in a month', [days(2026, 2), days(2028, 2), days(2026, 4), days(2026, 12), days(0, 2)], [28, 29, 30, 31, 29]);
+  is('the first and the last moment the tools read', [Core.TIME_FIRST, Core.TIME_LAST].map((t) => (t === t ? Core.stamp(t) : t)), ['1000-01-02 00:00:00.000', '9999-12-30 23:59:59.999']);
 }
 
 console.log(`${passed} passed, ${failed} failed`);

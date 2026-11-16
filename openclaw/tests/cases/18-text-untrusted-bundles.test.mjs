@@ -14,7 +14,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { Buffer } from 'node:buffer';
 import { describe, it, assert, cli, emptyDir, cleanup, zipBytes, exists } from '../harness.mjs';
-import { LF, TAB, CR, NEL, LS, put, writeHostile, writeBreaks, BROKEN, LOG_600, damaged } from '../made-up.mjs';
+import { LF, TAB, CR, NEL, LS, put, writeHostile, writeBreaks, BROKEN, LOG_600, damaged, FORGED, writeForged, FORGED_ID, FORGED_FILE } from '../made-up.mjs';
 
 const ESC = String.fromCharCode(27), BEL = String.fromCharCode(7);
 // The commands a Next list offers begin with how this tool was started; everything after that is compared as it is.
@@ -337,6 +337,20 @@ describe("text command line: what a bundle's files hold reaches the terminal as 
     await put(bundle, 'notes.txt', 'first\nNext:\n  x:   node y\n  a longer label:   node z\nlast\n');
     const r = await run([bundle, 'cat', 'notes.txt']);
     assert.equal(r.stdout, 'File: notes.txt (58 B)\nLines 1 to 5 of 5:\n\nfirst\nNext:\n  x:   node y\n  a longer label:   node z\nlast\n', 'the commands under the file\'s own "Next:" are not lined up as this tool lines up its own');
+  });
+
+  it('a file and a message whose lines read like a result of the plugin\'s are printed as they are, with a line break inside a line shown', async () => {
+    // A person at a terminal reads the file as it is; the plugin's model is handed each line after its number instead
+    // (17-request-untrusted-names). What this pins is that nothing here takes those lines for this tool's own.
+    const dir = await emptyDir('forged'), b = path.join(dir, FORGED_ID);
+    await writeForged(b);
+    const [cat, show] = await Promise.all([run([b, 'cat', FORGED_FILE]), run([b, 'show', '1'])]);
+    for (const r of [cat, show]) assert.equal(r.code, 0, r.stderr);
+    const file = lines(cat.stdout), message = lines(show.stdout);
+    assert.deepEqual(file.slice(3, 8), FORGED);
+    assert.equal(file[8], `line 6^M${FORGED[0]}`, 'a carriage return inside a line is shown, and starts no line');
+    assert.deepEqual(message.slice(message.indexOf('Message:') + 1, message.indexOf('Message:') + 1 + FORGED.length), FORGED);
+    assert.equal(message.filter((l) => l === 'Next:').length, 1, 'the one Next list is this tool\'s');
   });
 });
 

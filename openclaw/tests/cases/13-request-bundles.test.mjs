@@ -67,7 +67,8 @@ describe('request mode: choosing the bundle', () => {
     assert.equal(d.bundle, WATCH);
     assert.equal(d.receipt.bundle, WATCH);
     assert.equal(d.receipt.collectorMode, 'watch');
-    assert.deepEqual(d.receipt.availableBundles, [WATCH, HANG, COLLECT], 'names starting with a dot and plain files are not bundles');
+    assert.deepEqual(d.receipt.availableBundles, [{ id: WATCH, mode: 'watch', startedLocal: '2026-03-03 00:00:00' }, { id: HANG, mode: 'hang', startedLocal: '2026-02-02 00:00:00' },
+      { id: COLLECT, mode: 'collect', startedLocal: '2026-01-01 00:00:00' }], 'names starting with a dot and plain files are not bundles');
     assert.equal(d.receipt.bundles, 3);
     assert.equal(d.receipt.entries, 0);
     assert.deepEqual(d.notes, ['No file in this bundle is a log with timestamps this tool recognises, so it has no timeline entries.']);
@@ -78,7 +79,7 @@ describe('request mode: choosing the bundle', () => {
     const dir = await three();
     const [exact, capitals] = await Promise.all([ask(dir, 'read_file', { bundle: HANG, path: 'notes.txt' }), ask(dir, 'summary', { bundle: COLLECT.toUpperCase() })]);
     assert.equal(exact.bundle, HANG);
-    assert.equal(exact.text, `notes of ${HANG}`);
+    assert.equal(exact.text, `Line 1 of the file, after its line number:\n1: notes of ${HANG}`);
     assert.deepEqual(exact.notes, []);
     assert.equal(capitals.bundle, COLLECT);
     assert.deepEqual(capitals.notes.filter((n) => n.startsWith('bundle ')), [], 'the same id in other capitals needs no note');
@@ -100,7 +101,7 @@ describe('request mode: choosing the bundle', () => {
   it('an id that is nowhere is refused with the ids there are, and no bundle is opened in its place', async () => {
     const d = await ask(await three(), 'search', { bundle: 'Excel_Diagnostics_repro_20260404_000000', query: 'pivot' });
     assert.deepEqual(doc(d), { ok: false, error: 'no such bundle', field: 'bundle',
-      hint: `No bundle id is or contains "Excel_Diagnostics_repro_20260404_000000". The bundles here, newest first: "${WATCH}", "${HANG}", "${COLLECT}". Send one of these ids as bundle, or leave bundle out for the newest; do not guess an id.` });
+      hint: `No bundle id is or contains "Excel_Diagnostics_repro_20260404_000000". The bundles here, newest first (by the date and time in the id, then by when it was copied here): "${WATCH}", "${HANG}", "${COLLECT}". Send one of these ids as bundle, or leave bundle out for the newest; do not guess an id.` });
   });
 
   it('a name shaped like a path, or starting with a dot, is refused before any folder is looked at', async () => {
@@ -128,10 +129,35 @@ describe('request mode: choosing the bundle', () => {
     const [summary, many, none] = await Promise.all([ask(dir, 'summary'), ask(dir, 'summary', { bundle: 'batch' }), ask(dir, 'summary', { bundle: 'other' })]);
     assert.equal(summary.bundle, 'Batch_12');
     assert.equal(summary.receipt.bundles, 12);
-    assert.deepEqual(summary.receipt.availableBundles, ['Batch_12', 'Batch_11', 'Batch_10', 'Batch_09', 'Batch_08', 'Batch_07', 'Batch_06', 'Batch_05', 'Batch_04', 'Batch_03']);
+    assert.deepEqual(summary.receipt.availableBundles.map((b) => b.id), ['Batch_12', 'Batch_11', 'Batch_10', 'Batch_09', 'Batch_08', 'Batch_07', 'Batch_06', 'Batch_05', 'Batch_04', 'Batch_03']);
+    assert.ok(summary.receipt.availableBundles.every((b) => Object.keys(b).join() === 'id'), 'an id with no collector date in it is given alone');
     assert.equal(many.candidates.length, 10);
     assert.equal(many.hint, '"batch" is part of 12 bundle ids. Send one of the candidates, whole, as bundle.');
-    assert.match(none.hint, /newest first: "Batch_12", "Batch_11", .*"Batch_03", and 2 more\. Send one of these ids/);
+    assert.match(none.hint, /newest first \(by the date and time in the id, then by when it was copied here\): "Batch_12", "Batch_11", .*"Batch_03", and 2 more\. Send one of these ids/);
+  });
+
+  it('the newest is the one collected last, by the date and time in its id, and not the one copied here last', async () => {
+    const dir = await emptyDir('bundles');
+    // copied in the other way round from when they were collected, and two that a copy renamed or that no collector named
+    await bundle(dir, 'Excel_Diagnostics_hang_20260412_093000', '2026-04-01T00:00:00Z');
+    await bundle(dir, 'Excel_Diagnostics_collect_20260410_120000', '2026-04-20T00:00:00Z');
+    await bundle(dir, 'Excel_Diagnostics_watch_20260411_080000 2', '2026-04-02T00:00:00Z');
+    await bundle(dir, 'Somebody_s_logs', '2026-04-30T00:00:00Z');
+    await bundle(dir, 'Excel_Diagnostics_hang_20261341_000000', '2026-04-25T00:00:00Z');      // no thirteenth month: not a date
+    const d = await ask(dir, 'summary');
+    assert.equal(d.bundle, 'Excel_Diagnostics_hang_20260412_093000', 'collected last, copied here first');
+    assert.deepEqual(d.receipt.availableBundles, [
+      { id: 'Excel_Diagnostics_hang_20260412_093000', mode: 'hang', startedLocal: '2026-04-12 09:30:00' },
+      { id: 'Excel_Diagnostics_watch_20260411_080000 2', mode: 'watch', startedLocal: '2026-04-11 08:00:00' },
+      { id: 'Excel_Diagnostics_collect_20260410_120000', mode: 'collect', startedLocal: '2026-04-10 12:00:00' },
+      // then those whose id records no time, newest copied first
+      { id: 'Somebody_s_logs' }, { id: 'Excel_Diagnostics_hang_20261341_000000' }]);
+    const wrong = await ask(dir, 'summary', { bundle: 'nothing' });
+    assert.match(wrong.hint, /newest first \(by the date and time in the id, then by when it was copied here\): "Excel_Diagnostics_hang_20260412_093000", "Excel_Diagnostics_watch_20260411_080000 2", "Excel_Diagnostics_collect_20260410_120000", "Somebody_s_logs", "Excel_Diagnostics_hang_20261341_000000"\./);
+    // copying the id from availableBundles reaches that bundle
+    const chosen = await ask(dir, 'files', { bundle: d.receipt.availableBundles[2].id });
+    assert.equal(chosen.bundle, 'Excel_Diagnostics_collect_20260410_120000');
+    assert.deepEqual(chosen.notes, []);
   });
 
   it('an id with spaces and quotation marks is an id like any other', async () => {
@@ -170,7 +196,7 @@ describe('request mode: a zip is a bundle', () => {
     assert.equal(first.bundle, SAMPLE_ID, 'the id is the file name without .zip');
     assert.equal(first.receipt.entries, 32861);
     assert.equal(first.receipt.files, 17);
-    assert.deepEqual(first.receipt.availableBundles, [SAMPLE_ID]);
+    assert.deepEqual(first.receipt.availableBundles, [{ id: SAMPLE_ID }]);
     assert.match(first.stderr, /Unpacking Excel_Diagnostics_sample\.zip/, 'progress goes to standard error');
     assert.deepEqual(await tree(dir), before, 'nothing is written in the bundles folder');
     const unpacked = (await fs.readdir(cache)).filter((n) => n.startsWith(SAMPLE_ID));
@@ -179,7 +205,7 @@ describe('request mode: a zip is a bundle', () => {
     assert.equal(second.receipt.matched, 3839);
     assert.ok(!second.stderr.includes('Unpacking'), 'a later request reads what was unpacked');
     const text = await ask(dir, 'read_file', { path: 'summary.md', limit: 1, bundle: 'sample' }, { cacheDir: cache });
-    assert.equal(text.text, '# Excel diagnostics summary');
+    assert.equal(text.text, 'Line 1 of the file, after its line number:\n1: # Excel diagnostics summary');
     assert.deepEqual(text.notes, [`bundle "sample" was read as "${SAMPLE_ID}".`]);
   });
 
@@ -200,7 +226,7 @@ describe('request mode: a zip is a bundle', () => {
     await bundle(dir, 'Another', '2025-01-01T00:00:00Z');
     const d = await ask(dir, 'summary', { bundle: SAMPLE_ID }, { cacheDir: cache });
     assert.equal(d.receipt.bundles, 2);
-    assert.deepEqual(d.receipt.availableBundles, [SAMPLE_ID, 'Another']);
+    assert.deepEqual(d.receipt.availableBundles, [{ id: SAMPLE_ID }, { id: 'Another' }]);
     assert.equal(d.receipt.files, 1, 'the folder holds one file; the zip holds fifteen');
     assert.equal(d.receipt.entries, 0);
     assert.ok(!d.stderr.includes('Unpacking'));

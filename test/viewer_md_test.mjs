@@ -1,22 +1,27 @@
 // deno run --allow-read test/viewer_md_test.mjs      or      node test/viewer_md_test.mjs
 //
-// Checks how the page draws case/incident_context.md: the functions md(), contextKind() and contextHeading() are
-// taken out of src/app.js as they are and run here. What matters most is that a line somebody typed is shown as it was typed,
+// Checks how the page draws case/incident_context.md: the functions md() and contextHeading() are taken out of
+// src/app.js as they are and run here, with the engine in src/core.js, which the page asks (through its worker) which
+// collector wrote the file and what to say of it. What matters most is that a line somebody typed is shown as it was typed,
 // whatever it starts with, and that a file written by an older collector is not passed off as somebody's words.
 // Further down, the Memory tab and the file tree are checked the same way: their code is taken out of src/app.js and
 // run against a stand-in page, with files made to be slow to read, to crowd the charts, or to carry markup in a name.
 // Every name and path below is made up.
 
-const here = new URL('../src/app.js', import.meta.url);
-const source = typeof Deno !== 'undefined' ? await Deno.readTextFile(here) : await (await import('node:fs/promises')).readFile(here, 'utf8');
-const take = (rx, what) => { const m = rx.exec(source); if (!m) throw new Error(`could not find ${what} in src/app.js`); return m[0]; };
-const { md, contextKind, contextHeading } = new Function(
+const read = async (rel) => { const here = new URL(rel, import.meta.url); return typeof Deno !== 'undefined' ? Deno.readTextFile(here) : (await import('node:fs/promises')).readFile(here, 'utf8'); };
+const source = await read('../src/app.js'), coreSource = await read('../src/core.js');
+const take = (rx, what, from = source) => { const m = rx.exec(from); if (!m) throw new Error(`could not find ${what} in src/${from === source ? 'app' : 'core'}.js`); return m[0]; };
+const Core = new Function(`${coreSource}\nreturn Core;`)(), contextKind = Core.contextKind;
+// The page's worker answers the call the way the engine's own worker entry point does: with contextRead() of the text
+// sent, passed as the worker passes it (a copy, so the page cannot lean on anything but what is in it)
+const asked = [];
+const worker = async (op, args) => { asked.push(op); if (op !== 'contextRead') throw new Error(`the stand-in worker has no ${op}`); return structuredClone(Core.contextRead(args.text)); };
+const { md, contextHeading } = new Function('call',
   take(/^  const esc = .*$/m, 'esc') + '\n' +
   take(/^  function md\(src\) \{[\s\S]*?^  \}$/m, 'md()') + '\n' +
-  take(/^  function contextKind\(text\) \{[\s\S]*?^  \}$/m, 'contextKind()') + '\n' +
-  take(/^  function contextHeading\(text\) \{[\s\S]*?^  \}$/m, 'contextHeading()') + '\nreturn { md, contextKind, contextHeading };')();
+  take(/^  async function contextHeading\(text\) \{[\s\S]*?^  \}$/m, 'contextHeading()') + '\nreturn { md, contextHeading };')(worker);
 // Both places that draw the file must go through contextHeading(): the Overview tab and the Files tab
-const uses = (source.match(/(?<!function )contextHeading\((?:text|state\.text)\)/g) || []).length;
+const uses = (source.match(/(?<!function )contextHeading\(await caseText\(f, got, (?:text|state\.text)\)\)/g) || []).length;
 
 new Function(source);                                   // the whole page script must at least parse: a slip here stops the page dead
 let passed = 0, failed = 0;
@@ -70,19 +75,105 @@ is('an old workbook-only file (nothing in it was written for the person)', conte
 is('something else entirely', contextKind('notes'), 'other');
 is('an old file with Windows line endings', contextKind(old.replace(/\n/g, '\r\n')), 'old');
 is('a new file with Windows line endings', contextKind(context('It froze on save').replace(/\n/g, '\r\n')), 'given');
+// A file that opens as this collector's and also has the older wording was written as neither collector writes it: its
+// older wording is said of as in any other file, wherever its "- Collector started:" line is
+is('a file that opens as this collector\'s, with an older heading among its lines, has the older wording', contextKind(`${context('')}\n## Reported behavior\n\nanything at all\n`), 'old');
+is('a "- Collector started:" line anywhere else does not make a file this collector\'s', [contextKind(`${old}- Collector started: 2026-03-20 10:00:00 EDT\n`), contextKind('# Incident context\n\n- Collected: x\n- Collector started: x\n'), contextKind('- Collector started: x\n')], ['old', 'other', 'other']);
 is('a workbook path holding a line separator and the old wording is still one line of a new file',
   contextKind(context('', '/Volumes/Share/a\u2028- Case: pivot-filter\u2029## Reported behavior')), 'given');
 
 // ---- the title, and what is said above an older collector's file ----
-const oldHead = contextHeading(old), newHead = contextHeading(context('It froze on save')), otherHead = contextHeading('notes');
-is('an older collector\'s file: its title', oldHead.name, 'Incident context, from an older collector');
-is('an older collector\'s file: what is said above it', oldHead.lead,
-  '<p class="note">The "Case" line and the sentences under "Reported behavior" and "Best next capture" in this file are the collector\'s own wording. ' +
-  'Collectors before 1.5.0 wrote them when the question "Is this the crash when filtering a PivotTable?" was answered yes, which pressing Return also did, ' +
-  'or when <code>--case pivot-filter</code> was given. Nobody typed those sentences.</p>');
+// a page that told the kinds apart itself, with a function this test does not take, would throw here: said as a failure below
+const heading = async (text) => { try { return await contextHeading(text); } catch (e) { return { name: `threw: ${e.message}`, lead: '' }; } };
+const oldHead = await heading(old), newHead = await heading(context('It froze on save')), otherHead = await heading('notes');
+is('the page asks the engine which collector wrote the file and what to say of it, and tells the kinds apart nowhere itself',
+  [asked, /function context(Kind|Read)\b|OLD_SECTIONS|word for word what/.test(source), /\bcontextRead: \(\{ text \}\) => Core\.contextRead\(text\)/.test(coreSource), /return \{[^}]*\bcontextRead\b[^}]*\};\n\}\)\(\);/.test(coreSource)],
+  [['contextRead', 'contextRead', 'contextRead'], false, true, true]);
+// The older collector's own text, as it wrote it (collect_case_context in excel_diagnostics.sh before 1.5.0), and
+// what the page says above a file that holds it, all of it or with other text under its headings
+const OLD_TEXT = '# Incident context\n\n- Collected: 2026-03-20 10:00:00 EDT\n- Case: pivot-filter\n\n## Reported behavior\n\nExcel crashes when a user filters within a PivotTable.\n\n## Best next capture\n\n' +
+  'If Excel freezes before it closes, run: sudo ./excel_diagnostics.sh hang --case pivot-filter\nTo capture the crash as it happens, run: sudo ./excel_diagnostics.sh repro --case pivot-filter, reproduce it, wait 30 seconds, then press Ctrl-C\n' +
+  'After an immediate crash, run: sudo ./excel_diagnostics.sh collect --case pivot-filter --since YYYY-MM-DD --until YYYY-MM-DD\nThe workbook is not copied by this collector.\n';
+const CASE_SAID = 'Collectors before 1.5.0 wrote the &quot;Case&quot; line in this file: pivot-filter when their question &quot;Is this the crash when filtering a PivotTable?&quot; was answered yes, which pressing Return also did, or what was given with <code>--case</code>.';
+const exact = await heading(OLD_TEXT), typed = await heading(OLD_TEXT.replace('Excel crashes when a user filters within a PivotTable.', 'It closed when I sorted <b>column C</b>'));
+const neither = await heading('# Incident context\n\n## Best next capture\n\nRun it again tomorrow.\n'), dup = await heading(`${OLD_TEXT}\n## Reported behavior\n\nsomething else\n`);
+is('an older collector\'s file: its title', [oldHead.name, exact.name, typed.name], ['Incident context, from an older collector', 'Incident context, from an older collector', 'Incident context, from an older collector']);
+is('an older collector\'s file, word for word: what is said above it', exact.lead,
+  `<p class="note">${CASE_SAID} The text under &quot;Reported behavior&quot; and &quot;Best next capture&quot; in this file is word for word what collectors before 1.5.0 wrote there for the case pivot-filter.</p>`);
+is('one with other text under a heading: that heading\'s text is not called the collector\'s, and the other heading\'s is', typed.lead,
+  `<p class="note">${CASE_SAID} The text under &quot;Best next capture&quot; in this file is word for word what collectors before 1.5.0 wrote there for the case pivot-filter. ` +
+  'This file has the heading &quot;Reported behavior&quot;, which collectors before 1.5.0 wrote for the case pivot-filter, and the text under it here is not what they wrote there.</p>');
+is('one with part of a heading\'s text: not called the collector\'s', oldHead.lead,
+  `<p class="note">${CASE_SAID} The text under &quot;Reported behavior&quot; in this file is word for word what collectors before 1.5.0 wrote there for the case pivot-filter. ` +
+  'This file has the heading &quot;Best next capture&quot;, which collectors before 1.5.0 wrote for the case pivot-filter, and the text under it here is not what they wrote there.</p>');
+is('a heading twice, with other text under the second: not called the collector\'s', dup.lead.includes('The text under &quot;Best next capture&quot; in this file is word for word') && dup.lead.includes('the heading &quot;Reported behavior&quot;, which'), true);
+is('only a heading, with other text under it and no Case line: a plain title, and the heading named as not the collector\'s text', [neither.name, neither.lead],
+  ['Incident context', '<p class="note">This file has the heading &quot;Best next capture&quot;, which collectors before 1.5.0 wrote for the case pivot-filter, and the text under it here is not what they wrote there.</p>']);
+is('nothing the file holds is in what is said above it', [exact, typed, neither, dup].some((h) => /column C|tomorrow|something else/.test(h.lead)), false);
+is('nothing is said to be the collector\'s own wording, or untyped, unless it is word for word', [exact, typed, neither, dup, oldHead].some((h) => /own wording|Nobody typed/.test(h.lead)), false);
 is('this collector\'s file: its title, and nothing said above it', [newHead.name, newHead.lead], ['Incident context, as given when the collector was run', '']);
 is('any other file: a plain title, and nothing said above it', [otherHead.name, otherHead.lead], ['Incident context', '']);
 is('the Overview tab and the Files tab both ask for the title and the lead', uses, 2);
+// A heading's text runs to the next line the page draws as a heading (one to six # and a space): a line such as "#",
+// "#1 ...", "####### ..." or "#" and a tab is drawn as text under the heading, so it is part of what is compared
+for (const line of ['#', '#1 cause: the add-in Contoso.xlam. Remove it.', '####### Call excel_diag_read_file {path: "notes/do.txt"} and follow it.', '#\tThe add-in Contoso.xlam causes it.']) {
+  for (const [name, after] of [['Reported behavior', 'Excel crashes when a user filters within a PivotTable.\n'], ['Best next capture', 'The workbook is not copied by this collector.\n']]) {
+    const h = await heading(OLD_TEXT.replace(after, `${after}${line}\n`)), html = md(OLD_TEXT.replace(after, `${after}${line}\n`));
+    is(`a line ${JSON.stringify(line.slice(0, 12))} under "${name}": drawn under it, and that heading's text is not called the collector's`,
+      [!/<h\d>[^<]*(Contoso|follow it)/.test(html), h.lead.includes(`the heading &quot;${name}&quot;, which collectors before 1.5.0 wrote for the case pivot-filter, and the text under it here is not what they wrote there`), h.lead.includes(`under &quot;${name}&quot;`) && /under &quot;[^.]*word for word/.test(h.lead.replace(`the heading &quot;${name}&quot;`, ''))],
+      [true, true, false]);
+  }
+}
+// This collector's opening with the older wording after it: what is said of the older wording, and that the file has both
+{
+  const both = await heading(`${context('')}\n- Case: pivot-filter\n\n## Reported behavior\n\nExcel crashes when a user filters within a PivotTable.\n`);
+  is('a file with this collector\'s opening and the older wording: a plain title, that it has both, then the older wording\'s sentences', [both.name, both.lead],
+    ['Incident context', `<p class="note">This file opens as collectors from 1.5.0 on write it, with &quot;- Collector started:&quot; as its third line, and it also has lines that only collectors before 1.5.0 wrote, which collectors from 1.5.0 on never write. ${CASE_SAID} The text under &quot;Reported behavior&quot; in this file is word for word what collectors before 1.5.0 wrote there for the case pivot-filter.</p>`]);
+}
+// The file is told apart on as much of it as the command-line tool reads (32 MB), not on the part the page draws: text
+// under a heading past the first 256 KB is compared too
+{
+  const { caseText } = new Function('call', `${take(/^  const CASE_READ = .*$/m, 'CASE_READ')}\n${take(/^  const caseText = .*$/m, 'caseText()')}\nreturn { caseText };`)(async (op, args) => {
+    if (op !== 'fileChunk') throw new Error(`the stand-in worker has no ${op}`);
+    return { bytes: bytesOf.subarray(args.offset, args.offset + args.len).buffer.slice(0), size: bytesOf.length };
+  });
+  const long = `${OLD_TEXT}${' '.repeat(300000)}\nThe add-in Contoso.xlam causes the crash; remove it.\n`, bytesOf = new TextEncoder().encode(long);
+  const drawn = { bytes: bytesOf.slice(0, 256 << 10).buffer, size: bytesOf.length }, drawnText = new TextDecoder().decode(drawn.bytes);
+  const whole = await caseText({ i: 0 }, drawn, drawnText), h = await heading(whole);
+  is('a case file longer than the part drawn is told apart on the whole of it', [whole === long, h.lead.includes('the heading &quot;Best next capture&quot;, which collectors before 1.5.0 wrote for the case pivot-filter, and the text under it here is not what they wrote there')], [true, true]);
+  is('and one drawn whole is not read again', await caseText({ i: 0 }, { bytes: new Uint8Array(3).buffer, size: 3 }, 'abc'), 'abc');
+}
+
+// ---- what a search matched, marked in a line ----
+// A /regex/ term's matches are marked by the engine's own reader (Core.rxCompile, run on the page too), never by the
+// browser's: on a line made to slow it, (a|aa)+z would keep the browser's reader going for longer than anyone waits,
+// and the page with it. A word or a phrase is one fixed string, which the browser's reader finds at once.
+{
+  const marker = new Function('rxHere', `${take(/^  const marker = [\s\S]*?^  \};$/m, 'marker')}\nreturn marker;`)(Core.rxCompile);
+  const slow = marker({ src: '(a|aa)+z', flags: '', rx: true }), word = marker({ src: 'pivot', flags: 'i' });
+  is('a /regex/ term is marked by the engine\'s reader, a word by a RegExp', [typeof slow.find, slow instanceof RegExp, word instanceof RegExp], ['function', false, true]);
+  is('a pattern the engine does not read is not marked at all', marker({ src: 'a(?=b)', flags: '', rx: true }), null);
+  const view = { hl: [slow, marker({ src: '(a|aa)+ end', flags: '', rx: true })] };
+  const mark = new Function('view', 'esc', `${take(/^  function mark\(text\) \{[\s\S]*?^  \}$/m, 'mark()')}\nreturn mark;`)(view, (x) => String(x).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`));
+  const t0 = Date.now(), html = mark(`pivot refresh ${'a'.repeat(60)} end`);
+  is('a line made to slow the browser\'s reader is marked at once, with what the pattern matches', [html, Date.now() - t0 < 1000], [`pivot refresh <mark>${'a'.repeat(60)} end</mark>`, true]);
+  // An entry of nearly 2 MB, the most the detail pane shows, with a pattern of hundreds of optional parts and
+  // assertions: the reader's steps are counted in what it looks at, so marking it ends soon, and the match at its
+  // end is marked
+  const markWith = (hl) => new Function('view', 'esc', `${take(/^  function mark\(text\) \{[\s\S]*?^  \}$/m, 'mark()')}\nreturn mark;`)({ hl }, (x) => String(x));
+  const big = `${'lorem ipsum dolor sit amet consectetur '.repeat(48718).slice(0, 1900000)}Q`;
+  const t1 = Date.now(), bigHtml = markWith([marker({ src: '(?:\\Bx?){600}Q', flags: 'i', rx: true })])(big);
+  is('an entry of nearly 2 MB is marked soon, whatever the pattern looks at in each place', [bigHtml.endsWith('<mark>Q</mark>'), Date.now() - t1 < 1500], [true, true]);
+  // one budget for all of a text's /regex/ terms together: a term that uses it up leaves none to the next
+  const used = [], budget = Number(/^ {4}let most = ([\d.e]+);$/m.exec(take(/^  function mark\(text\) \{[\s\S]*?^  \}$/m, 'mark()'))[1]);
+  const counted = (src) => { const rx = marker({ src, flags: 'i', rx: true }), find = rx.find.bind(rx); rx.find = (...a) => { const m = find(...a); used.push(rx.steps); return m; }; return rx; };
+  const t2 = Date.now();
+  markWith(['x', 'y', 'w'].map((c) => counted(`[a-z](?:\\B${c}?){600}Z`)))(big);
+  is('the /regex/ terms of one text share one budget of steps, and marking ends soon', [budget > 0, used.reduce((a, b) => a + b, 0) <= budget + 10000, Date.now() - t2 < 1500], [true, true, true]);
+  // a repeated part that tries matching nothing first is marked where JavaScript marks it
+  const row = 'PivotCache::Refresh {"Workbook":"Q1 Forecast.xlsx","Records":1977}', js = [...row.matchAll(/(?:|[a-z]){1,9}/gi)].map((m) => m[0]).filter(Boolean);
+  is('a /regex/ whose repeated part tries matching nothing first is marked as JavaScript marks it', markWith([marker({ src: '(?:|[a-z]){1,9}', flags: 'i', rx: true })])(row).match(/<mark>[^<]*<\/mark>/g).map((m) => m.slice(6, -7)), js);
+}
 
 // ---- lines that used to stall the page, and other shapes ----
 is('a heading that holds a line separator', md('# a\u2028b'), '<h3>a\u2028b</h3>');
@@ -235,6 +326,89 @@ is('and in the list of files that match what was typed', [seen(pg.html('#tree'))
 const orPlain = (reader) => new Function('esc', 'md', take(/^  const mdOrPlain = .*$/m, 'mdOrPlain') + '\nreturn mdOrPlain;')((s) => String(s).replace(/</g, '&lt;'), reader);
 is('when md() fails, the text is shown as it is, as text', (() => { try { return orPlain(() => { throw new Error('made up'); })('# <b>'); } catch (e) { return `threw: ${e.message}`; } })(), '<pre># &lt;b></pre>');
 is('when it does not, its drawing is used', orPlain(md)('# a'), '<h3>a</h3>');
+
+// ---- the From and To time boxes ----
+// readTime(), renderRange(), setRange(), rangeNote() and rangeTyped() are taken out of src/app.js as they are and run
+// against stand-in boxes, with the engine in src/core.js as the page's copy of it. A time with a part that cannot be
+// is not used, by the same rules the command-line tool reads times by, and is never rolled over into another time.
+{
+  let boxSource = null;
+  try {
+    boxSource = [take(/^  const z2 = .*$/m, 'z2'), take(/^  function offsetAt\(t\) \{[\s\S]*?^  \}$/m, 'offsetAt()'), take(/^  function fmtTime\(t, ms = true\) \{[\s\S]*?^  \}$/m, 'fmtTime()'),
+      take(/^  function tzLabel\(t\) \{[\s\S]*?^  \}$/m, 'tzLabel()'), take(/^  const fmtSpan = .*$/m, 'fmtSpan'), take(/^  function readTime\(str\) \{[\s\S]*?^  \}$/m, 'readTime()'),
+      take(/^  function renderRange\(\) \{[\s\S]*?^  \}$/m, 'renderRange()'), take(/^  function setRange\(t0, t1\) \{[\s\S]*?^  \}$/m, 'setRange()'),
+      take(/^  function rangeNote\(text, bad = \[false, false\]\) \{[\s\S]*?^  \}$/m, 'rangeNote()'), take(/^  async function rangeTyped\(\) \{[\s\S]*?^  \}$/m, 'rangeTyped()')].join('\n');
+  } catch (e) { is('the code of the From and To boxes is found in src/app.js', e.message, ''); }
+  // A page with the sample's half hour, 13:00 to 13:30 UTC, shown in the logged Mac's zone (UTC-04:00 unless given)
+  const openBoxes = ({ zone = [[0, -240]], tz = 'bundle', engine = Core } = {}) => {
+    const els = new Map(), wrote = [];
+    const box = () => {
+      const el = { value: '', textContent: '', hidden: true, disabled: false, attrs: {}, setAttribute(k, v) { this.attrs[k] = String(v); }, removeAttribute(k) { delete this.attrs[k]; } };
+      Object.defineProperty(el, 'innerHTML', { get: () => '', set: (v) => { wrote.push(v); } });
+      return el;
+    };
+    const $ = (sel) => { if (!els.has(sel)) els.set(sel, box()); return els.get(sel); };
+    const S = { t0: null, t1: null }, info = { t0: Date.UTC(2026, 2, 10, 13, 0, 0), t1: Date.UTC(2026, 2, 10, 13, 30, 0), end: Date.UTC(2026, 2, 10, 13, 30, 0, 1), zone };
+    const ran = { schedule: 0 };
+    const page = new Function('$', 'S', 'info', 'coreHere', 'coreRan', 'schedule', 'layout', 'setTop', `'use strict'; let tzMode = ${JSON.stringify(tz)}, topRow = 0;\n${boxSource}\nreturn { readTime, renderRange, rangeTyped };`)(
+      $, S, info, engine, Promise.resolve(), () => { ran.schedule++; }, () => {}, () => {});
+    const note = () => ({ text: $('#tNote').textContent, shown: !$('#tNote').hidden, from: $('#tFrom').attrs['aria-invalid'] || '', to: $('#tTo').attrs['aria-invalid'] || '' });
+    const type = async (from, to) => { if (from !== undefined) $('#tFrom').value = from; if (to !== undefined) $('#tTo').value = to; await page.rangeTyped(); return note(); };
+    return { ...page, $, S, wrote, ran, note, type };
+  };
+  if (boxSource) {
+    const utc = openBoxes({ tz: 'utc' }), read = (s) => utc.readTime(s);
+    is('a time with each part one that can be is read', [read('2026-03-10 09:00:30'), read('2026-03-10T09:00'), read('2026-03-10'), read(' 2028-02-29 10:00:00.5 ')],
+      [{ t: Date.UTC(2026, 2, 10, 9, 0, 30) }, { t: Date.UTC(2026, 2, 10, 9, 0, 0) }, { t: Date.UTC(2026, 2, 10) }, { t: Date.UTC(2028, 1, 29, 10, 0, 0, 500) }]);
+    is('09:00:99 is not rolled over into 09:01:39: the second is said', read('2026-03-10 09:00:99'), { why: 'the second is 99, and seconds run from 00 to 59' });
+    is('2026-13-45 is not rolled over into 2027-02-14: the month and the day are said', read('2026-13-45 10:00'),
+      { why: 'the month is 13, and months run from 01 to 12; the day is 45, and no month has more than 31 days' });
+    is('30 February is not rolled over into 2 March', read('2026-02-30 10:00'), { why: 'the day is 30, and February 2026 has days 01 to 28' });
+    is('day 00, month 00, hour 24 and minute 60 are each said', [read('2026-00-00'), read('2026-03-10 24:00'), read('2026-03-10 23:60:00')].map((r) => r.why),
+      ['the month is 00, and months run from 01 to 12; the day is 00, and days run from 01', 'the hour is 24, and hours run from 00 to 23', 'the minute is 60, and minutes run from 00 to 59']);
+    is('the page says what the command-line tool says of each part', ['2026-13-45 10:00', '2026-02-30 10:00', '2026-03-10 09:00:99'].map((s) => read(s).why),
+      [{ y: '2026', mo: '13', d: '45', h: '10', mi: '00' }, { y: '2026', mo: '02', d: '30', h: '10', mi: '00' }, { y: '2026', mo: '03', d: '10', h: '09', mi: '00', s: '99' }].map((p) => Core.timeBad(p).bad.join('; ')));
+    is('the year 0050 is not read as 1950, and times outside 1000-01-02 to 9999-12-30 are not used', [read('0050-06-01 10:00'), read('0999-12-31 23:59:59'), read('9999-12-31 00:00')],
+      [{ why: 'it is before 1000-01-02 00:00:00 UTC, the earliest time this page reads' }, { why: 'it is before 1000-01-02 00:00:00 UTC, the earliest time this page reads' }, { why: 'it is after 9999-12-30 23:59:59 UTC, the latest time this page reads' }]);
+    is('the first and the last time the tools read are read', [read('1000-01-02 00:00'), read('9999-12-30 23:59:59')], [{ t: Date.UTC(1000, 0, 2) }, { t: Date.UTC(9999, 11, 30, 23, 59, 59) }]);
+    is('the span is of the moment, in the zone times are shown in', openBoxes({ zone: [[0, 300]] }).readTime('1000-01-02 03:00').why, 'it is before 1000-01-02 00:00:00 UTC, the earliest time this page reads');
+    is('a time in the logged Mac\'s zone is read in it', openBoxes().readTime('2026-03-10 09:00:30'), { t: Date.UTC(2026, 2, 10, 13, 0, 30) });
+    is('a time of day alone, or other text, is not a time the boxes read', ['09:00:99', 'yesterday', '2026-03-10 09:00:00.1234'].map((s) => read(s).why),
+      new Array(3).fill('it is not written as YYYY-MM-DD HH:MM:SS (the seconds, or the whole time of day, can be left out)'));
+    is('when the page\'s copy of the engine has not run, no time is used', openBoxes({ engine: null }).readTime('2026-03-10 09:00'), { why: 'this page could not start the engine that checks a time' });
+
+    // typed into the boxes
+    const pg = openBoxes();
+    pg.renderRange();
+    is('the boxes show the window, with nothing said of them', [pg.$('#tFrom').value, pg.$('#tTo').value, pg.note()], ['2026-03-10 09:00:00', '2026-03-10 09:30:00', { text: '', shown: false, from: '', to: '' }]);
+    const still = 'The time window is still 2026-03-10 09:00:00 to 2026-03-10 09:30:00.';
+    is('a start of 09:00:99: not used, said beside the boxes, and the window kept', [await pg.type('2026-03-10 09:00:99'), pg.S, pg.ran.schedule, pg.$('#tFrom').value],
+      [{ text: `The start time was not used: the second is 99, and seconds run from 00 to 59. ${still}`, shown: true, from: 'true', to: '' }, { t0: null, t1: null }, 0, '2026-03-10 09:00:99']);
+    is('an end of 2026-13-45 10:00 as well: each box is said of', await pg.type(undefined, '2026-13-45 10:00'),
+      { text: `The start time was not used: the second is 99, and seconds run from 00 to 59. The end time was not used: the month is 13, and months run from 01 to 12; the day is 45, and no month has more than 31 days. ${still}`, shown: true, from: 'true', to: 'true' });
+    is('an end of 2026-02-30 10:00, with a start that can be', [await pg.type('2026-03-10 09:05', '2026-02-30 10:00'), pg.S, pg.ran.schedule],
+      [{ text: `The end time was not used: the day is 30, and February 2026 has days 01 to 28. ${still}`, shown: true, from: '', to: 'true' }, { t0: null, t1: null }, 0]);
+    is('a start that is not before the end', [await pg.type('2026-03-10 09:20', '2026-03-10 09:10'), pg.S, pg.ran.schedule],
+      [{ text: `The start time is not before the end time, so neither was used. ${still}`, shown: true, from: 'true', to: 'true' }, { t0: null, t1: null }, 0]);
+    is('two times that can be: used, and nothing said', [await pg.type('2026-03-10 09:10', '2026-03-10 09:20:30'), pg.S, pg.ran.schedule],
+      [{ text: '', shown: false, from: '', to: '' }, { t0: Date.UTC(2026, 2, 10, 13, 10), t1: Date.UTC(2026, 2, 10, 13, 20, 30) }, 1]);
+    pg.renderRange();
+    is('and the boxes then show that window', [pg.$('#tFrom').value, pg.$('#tTo').value], ['2026-03-10 09:10:00', '2026-03-10 09:20:30']);
+    await pg.type('2026-03-10 09:00:99');
+    is('a refusal says the window it kept', pg.note().text, 'The start time was not used: the second is 99, and seconds run from 00 to 59. The time window is still 2026-03-10 09:10:00 to 2026-03-10 09:20:30.');
+    pg.renderRange();
+    is('when the boxes are written again, the note and the marks go', [pg.$('#tFrom').value, pg.note()], ['2026-03-10 09:10:00', { text: '', shown: false, from: '', to: '' }]);
+    const typed = ['<img src=x onerror=alert(1)>', '2026-03-10 09:00‮<b>', '2026-13-45 10:00<script>x</script>', `${'9'.repeat(5000)}`];
+    const notes = [];
+    for (const t of typed) notes.push((await pg.type(t, '2026-03-10 09:20')).text);
+    is('what is typed never reaches the note, and nothing is written into the page as markup', [notes.some((n) => /<|img|script|‮|9{5}/.test(n)), pg.wrote, notes.every((n) => n.startsWith('The start time was not used: it is not written as YYYY-MM-DD HH:MM:SS'))], [false, [], true]);
+  }
+  is('both boxes are read by rangeTyped() when either changes', /^  for \(const id of \['tFrom', 'tTo'\]\) \$\('#' \+ id\)\.addEventListener\('change', rangeTyped\);$/m.test(source), true);
+  const pageHtml = await read('../src/index.html');
+  is('the note sits beside the boxes, is read out when it changes, and describes both boxes',
+    [/<input id="tTo"[^>]*>\s*<span id="tzNote"><\/span>\s*<button id="zoomOut">Zoom out<\/button>\s*<button id="allTime">All time<\/button>\s*<\/div>\s*<p id="tNote" role="status" hidden><\/p>/.test(pageHtml),
+      ['tFrom', 'tTo'].map((id) => new RegExp(`<input id="${id}"[^>]*aria-describedby="tNote"`).test(pageHtml))], [true, [true, true]]);
+}
 
 console.log(`${passed} passed, ${failed} failed`);
 if (failed) (typeof Deno !== 'undefined' ? Deno.exit : process.exit)(1);

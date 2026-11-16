@@ -128,7 +128,7 @@ not a Mac, the installer says so and the files stay installed.
 4. **Check the install** (next section).
 
 A zipped bundle is unpacked the first time a tool reads it, inside the time one call may take (120 seconds
-unless set). If the tools report that a bundle is too slow to search, copy the bundle in unzipped, or raise
+unless set). If calls are stopped because they took longer than that, copy the bundle in unzipped, or raise
 `plugins.entries.excel-diagnostics.config.timeoutSeconds` (at most 600) and restart the Gateway.
 
 To keep bundles somewhere else, set `plugins.entries.excel-diagnostics.config.bundlesDir` to an absolute path
@@ -149,6 +149,32 @@ tools answer that no bundles are available.
 
 Running the installer again is safe: it replaces only files whose content differs, adds no name twice, and
 makes a backup only of what it replaces. It restarts the Gateway each time unless you pass `--skip-restart`.
+
+## The model's context window
+
+A small local model holds only so much at once. These tools add three things to what it holds:
+
+| What | Size |
+| --- | --- |
+| The ten tools, as the plugin registers them (names, descriptions, schemas) | about 10,400 characters of JSON |
+| `SKILL.md` | about 7,600 characters |
+| One tool result | at most about 22,000 characters: up to 10,000 of text, 7,000 of JSON facts, 3,000 of facts about the call and 2,000 of `Next:`. On the built-in sample bundle most results are 700 to 6,500 characters. |
+
+The plugin passes on no result over 27,400 characters, a little more than the most the program gives, so it
+refuses only a result the program did not bound.
+
+At about four characters a token (log lines full of numbers and ids take more tokens for their length), the
+tools and the skill come to about 4,500 tokens and one result to at most about 5,500. The context length the
+model runs with has to hold those, OpenClaw's own instructions, the conversation, and the results of every call
+in a turn; what does not fit is not seen by the model. In Ollama that length is the `num_ctx` parameter (in a
+Modelfile, `PARAMETER num_ctx 32768`, or as an option of a request) or, in recent Ollama versions, the
+`OLLAMA_CONTEXT_LENGTH` setting of the Ollama server. Before OpenClaw's own instructions and the conversation
+are counted, 32,768 tokens hold the tools, the skill and five results of the largest size; 8,192 do not hold
+the tools, the skill and one.
+
+Whether OpenClaw sends Ollama a context length of its own, and where it is set, is not covered here: see the
+OpenClaw documentation for your version. None of this has been checked on a live OpenClaw Gateway: the figures
+are measured on the plugin and the program alone.
 
 ## If the installer stops
 

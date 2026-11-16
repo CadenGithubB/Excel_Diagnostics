@@ -7,8 +7,10 @@
 //
 // A description is all a model knows of a tool before it reads the skill, and it copies from it: the argument
 // shape must be the schema's own names, the wrong names it reaches for must be named, and a time must be said to
-// be written the way results print it. The six everyday tools must stay in the tool list (direct-only), because
-// a search text does not survive the escaping that the wrapper for deferred tools asks of a small model.
+// be written the way results print it. Every tool must stay in the tool list (direct-only), because a search text
+// does not survive the escaping that the wrapper for deferred tools asks of a small model, and a small model calls a
+// deferred tool by its bare name all the same. All ten are then read on every turn, so together they must take less
+// of the model's context than the six direct tools did when the other four were deferred: 10,424 characters as JSON.
 //
 // Configuration that is wrong must not take the tools down: a bad value falls back to the default and one log
 // line says so.
@@ -20,7 +22,6 @@ import { describe, it, assert, loadPlugin, emptyDir, cleanup, PLUGIN_DIR } from 
 
 const NAMES = ['excel_diag_summary', 'excel_diag_search', 'excel_diag_count', 'excel_diag_histogram', 'excel_diag_show',
   'excel_diag_context', 'excel_diag_reports', 'excel_diag_files', 'excel_diag_read_file', 'excel_diag_memory'];
-const DIRECT = ['excel_diag_summary', 'excel_diag_search', 'excel_diag_show', 'excel_diag_context', 'excel_diag_reports', 'excel_diag_read_file'];
 const FILTERS = { query: 'string', from: 'string', to: 'string', aroundId: 'integer', aroundTime: 'string', window: 'string', minSeverity: 'string', matchCase: 'boolean', utc: 'boolean', bundle: 'string' };
 // The argument names and types of each tool, as the build contract lists them for the operation behind it.
 const ARGUMENTS = {
@@ -30,16 +31,16 @@ const ARGUMENTS = {
   excel_diag_histogram: { ...FILTERS, bins: 'integer' },
   excel_diag_show: { id: 'integer', maxChars: 'integer', utc: 'boolean', bundle: 'string' },
   excel_diag_context: { id: 'integer', time: 'string', before: 'integer', after: 'integer', window: 'string', maxChars: 'integer', utc: 'boolean', bundle: 'string' },
-  excel_diag_reports: { utc: 'boolean', bundle: 'string' },
+  excel_diag_reports: { path: 'string', utc: 'boolean', bundle: 'string' },
   excel_diag_files: { filter: 'string', limit: 'integer', offset: 'integer', bundle: 'string' },
   excel_diag_read_file: { path: 'string', fromLine: 'integer', limit: 'integer', grep: 'string', bundle: 'string' },
-  excel_diag_memory: { utc: 'boolean', bundle: 'string' },
+  excel_diag_memory: { time: 'string', from: 'string', to: 'string', utc: 'boolean', bundle: 'string' },
 };
 const MANIFEST = {
   id: 'excel-diagnostics',
   name: 'Excel Diagnostics',
   description: 'Read-only search of Excel diagnostics log bundles kept in a folder on the host.',
-  version: '1.0.1',
+  version: '1.1.0',
   configSchema: {
     type: 'object',
     additionalProperties: false,
@@ -63,7 +64,7 @@ describe('plugin registration: manifest and entry', () => {
   it('package.json points the host at index.js and asks for nothing to be installed', async () => {
     const pkg = await readJson('package.json');
     assert.equal(pkg.name, 'openclaw-plugin-excel-diagnostics');
-    assert.equal(pkg.version, '1.0.1');
+    assert.equal(pkg.version, '1.1.0');
     assert.equal(pkg.type, 'module');
     assert.equal(pkg.private, true);
     assert.ok(typeof pkg.description === 'string' && pkg.description.length > 0 && !pkg.description.includes('\n'));
@@ -106,15 +107,20 @@ describe('plugin registration: manifest and entry', () => {
     }
   });
 
-  it('the six everyday tools are direct-only and the other four stay deferred', async () => {
+  it('all ten tools are direct-only: none is left to the host\'s wrapper for deferred tools', async () => {
     const p = await loadPlugin();
     assert.ok(p.module.DIRECT_TOOLS instanceof Set);
-    assert.deepEqual([...p.module.DIRECT_TOOLS].sort(), [...DIRECT].sort());
-    for (const name of NAMES) {
-      const def = p.definitions.get(name);
-      if (DIRECT.includes(name)) assert.equal(def.catalogMode, 'direct-only', `${name} stays in the tool list`);
-      else { assert.equal(def.catalogMode, undefined, `${name} stays deferred`); assert.ok(!('catalogMode' in def)); }
-    }
+    assert.deepEqual([...p.module.DIRECT_TOOLS], NAMES);
+    for (const name of NAMES) assert.equal(p.definitions.get(name).catalogMode, 'direct-only', `${name} stays in the tool list`);
+  });
+
+  it('the ten, as registered, come to fewer characters than the six direct tools did with four deferred', async () => {
+    // Measured as the host is handed them: name, description, schema and catalogMode, as JSON. The six were 10,424.
+    const p = await loadPlugin();
+    const registered = [...p.definitions.values()].map(({ name, description, parameters, catalogMode }) => ({ name, description, parameters, catalogMode }));
+    const size = JSON.stringify(registered).length;
+    assert.equal(registered.length, 10);
+    assert.ok(size < 10424, `the ten tools come to ${size} characters`);
   });
 
   it('only the repeat guard is hooked', async () => {
@@ -227,12 +233,20 @@ describe('plugin registration: descriptions', () => {
       for (const w of wrong) assert.ok(tool(name).description.includes(w), `${name} does not say ${w} is not accepted`);
       assert.ok(/\bnot '/.test(tool(name).description));
     }
-    const params = { query: "'q'", id: "'entry'", path: "'filename'", minSeverity: "'severity'", bundle: "'name'", by: "'groupBy'", bins: "'buckets'", time: "'aroundTime'", grep: "'pattern'", filter: "'pattern'", fromLine: "'offset'" };
+    const params = { query: "'q'", id: "'entry'", path: "'filename'", minSeverity: "'severity'", bundle: "'name'", by: "'groupBy'", bins: "'buckets'", time: "'aroundTime'", grep: "'pattern'", filter: "'pattern'", fromLine: "'offset'",
+      from: "'start' or 'since'", to: "'end' or 'until'" };
     for (const t of mod.TOOLS) {
       for (const [name, prop] of Object.entries(t.parameters.properties)) {
         if (params[name]) assert.ok(prop.description.includes(params[name]), `${t.name}.${name} does not say ${params[name]} is not accepted`);
       }
     }
+  });
+
+  it('a context window is not said to list everything in it: a long one lists only the entries nearest the anchor', async () => {
+    const { module: mod } = await loadPlugin();
+    const window = mod.TOOLS.find((t) => t.name === 'excel_diag_context').parameters.properties.window.description;
+    assert.ok(!/\b(all|every|everything|whole)\b/i.test(window), window);
+    assert.ok(window.includes('before and after'), 'it says what it takes the place of');
   });
 
   it('a value to copy is said to come from a named column or field of a named tool', async () => {
@@ -243,7 +257,8 @@ describe('plugin registration: descriptions', () => {
     assert.ok(tool('excel_diag_search').description.includes('ID column'));
     assert.ok(tool('excel_diag_read_file').description.includes('PATH column of excel_diag_files or the FILE column of excel_diag_reports'));
     assert.ok(tool('excel_diag_files').description.includes('path of excel_diag_read_file'));
-    assert.ok(tool('excel_diag_reports').description.includes('path of excel_diag_read_file'));
+    assert.ok(tool('excel_diag_reports').description.includes('ID goes into id of excel_diag_context, and FILE into path'));
+    assert.ok(tool('excel_diag_reports').parameters.properties.path.description.includes('FILE column'));
     assert.ok(tool('excel_diag_summary').description.includes('availableBundles'));
     for (const t of mod.TOOLS) assert.ok(t.parameters.properties.bundle.description.includes('availableBundles in excel_diag_summary'), `${t.name}.bundle`);
     for (const name of ['excel_diag_search', 'excel_diag_files']) assert.ok(tool(name).parameters.properties.offset.description.includes('nextOffset'));
@@ -261,7 +276,7 @@ describe('plugin registration: descriptions', () => {
         assert.ok(prop.description.includes('written the way results print times'), `${t.name}.${name}`);
       }
     }
-    assert.equal(times, 10);
+    assert.equal(times, 13);
     assert.ok(mod.TOOLS.find((t) => t.name === 'excel_diag_context').description.includes('written the way results print times'));
   });
 

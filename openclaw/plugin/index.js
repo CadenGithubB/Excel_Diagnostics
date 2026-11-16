@@ -3,8 +3,10 @@
  * The plugin does no log work itself. For each call it starts the command-line tool (excel_diagnostics_cli.mjs,
  * the viewer's own engine) in request mode, gives it the arguments the tool declares exactly as the model sent
  * them, and lays the answer out for the model: how the call was read, one line of facts as JSON, the quoted lines,
- * then what could be called next. Arguments are checked in that program and not here, so a wrong call always comes
- * back with the program's own sentence about what to send instead.
+ * then what could be called next, or a line that says the result ends. Arguments are checked in that program and
+ * not here, so a wrong call always comes back with the program's own sentence about what to send instead: the names
+ * a tool does not declare are handed to it apart from the arguments, for it to refuse the ones that stand for an
+ * argument of another name.
  *
  * Every string below that reaches the model (descriptions, facts, refusals) is written for a small local model
  * that acts on what it reads word for word: it names real fields, it never shows a path on this machine, and it
@@ -27,7 +29,21 @@ const TIMEOUT_USUAL = 120;                                // seconds one call ma
 const TIMEOUT_LEAST = 5;
 const TIMEOUT_MOST = 600;
 const OUTPUT_MOST = 2 * 1024 * 1024;                      // bytes of standard output taken from one run of the program
-const RESULT_MOST = 200000;                               // characters of one result handed to the model
+// The ceiling on one result handed to the model, just above the most the program gives in one answer: its own limits
+// on the text, the receipt, the notes and Next (TEXT_MOST, RECEIPT_MOST, NOTES_MOST and NEXT_MOST in src/request.js,
+// restated here: a case in the tests checks that they agree), and room for what is laid round them here: the bundle
+// id, which can be as long as a file name with every character written as its escape, the words and markers of the
+// blocks, and the names that were ignored, said back (IGNORED_SAID of them at most, each cut short). So a result the
+// program gives whole is never refused here; one over it is something the program did not bound.
+export const PROGRAM_MOST = { text: 10000, receipt: 7000, notes: 3000, next: 2000 };
+const IGNORED_SAID = 10, IGNORED_NAME_MOST = 40;
+// A file name is at most 255 bytes, and no byte of it is written as more than a six-character escape. An ignored name
+// is cut to IGNORED_NAME_MOST characters and an ellipsis, each character written as one escape at most, in the JSON
+// line (with its quotation marks and a comma) and said once more in its fact (with a comma and a space). A thousand
+// characters are for the rest: the keys of the JSON line, the words of the blocks and of the fact about ignored
+// names, and the allowed names.
+const LAID_ROUND = 255 * 6 + IGNORED_SAID * ((IGNORED_NAME_MOST * 6 + 4) + (IGNORED_NAME_MOST + 3)) + 1000;
+export const RESULT_MOST = Object.values(PROGRAM_MOST).reduce((a, n) => a + n, 0) + LAID_ROUND;
 
 const REPEAT_REFUSED = 3;                                 // which identical call in a row is refused
 const REPEAT_WINDOW_MS = 30 * 60_000;
@@ -43,28 +59,30 @@ const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 //
 // A description is all the model knows of a tool before it reads the skill. Each leads with the argument shape,
 // shows one value, says which result column or field a value is copied from, and names the wrong argument names a
-// model reaches for, because an undeclared name narrows nothing.
+// model reaches for, because an undeclared name narrows nothing. All ten are in the model's tool list (DIRECT_TOOLS),
+// so every word here is read on every turn: a description is one sentence where it can be, and text that several
+// arguments share (the bundle, the clock, the filters) is said once, short, and not explained again in each.
 const str = (description) => ({ type: 'string', description });
 const int = (description) => ({ type: 'integer', description });
 const bool = (description) => ({ type: 'boolean', description });
 const schema = (properties) => ({ type: 'object', properties, required: [] });
 
 const AS_PRINTED = 'written the way results print times';
-const BOOLEAN = 'Send true or false without quotation marks.';
 // Sizes are described without a figure: a small model takes a number it is shown for the number to send.
 const WHOLE = 'a whole number without quotation marks';
-const utc = () => bool(`true prints times in UTC and reads the times you send as UTC. Left out, times are in the zone the result names in timeZone. ${BOOLEAN}`);
-const bundle = () => str(`Bundle id, copied from availableBundles in excel_diag_summary results. Leave it out for the newest bundle. It is an id, never a file path (not 'name', 'file' or 'bundleId').`);
-// The arguments excel_diag_search, excel_diag_count and excel_diag_histogram share. Each tool gets its own copy.
-const filters = () => ({
-  query: str(`Words to find, all of them, e.g. {query: "pivot cache"}. Also "a phrase", -word, /regex/ and fields such as tag:memory (process: level: pid: subsystem: category: source:). Not 'q' or 'text'.`),
-  from: str(`Start of a time span, ${AS_PRINTED}, e.g. "2026-03-10 10:30:00". A date alone means midnight (not 'start' or 'since').`),
-  to: str(`End of a time span, ${AS_PRINTED}, e.g. "2026-03-10 11:00:00". A date alone means midnight (not 'end' or 'until').`),
-  aroundId: int(`Centre a time span on this entry: a number from the ID column of results, e.g. 15501. window sets the length either side. Not together with aroundTime, from or to.`),
-  aroundTime: str(`Centre a time span on this time, ${AS_PRINTED}, e.g. "2026-03-10 10:35:00". window sets the length either side. Not together with aroundId, from or to.`),
-  window: str(`Length of time either side of aroundId or aroundTime: a number and a unit in one string, e.g. "30s", "2m" or "1h" (also ms and d). It needs one of those two; for a fixed span send from and to.`),
-  minSeverity: str(`Lowest severity to keep: "debug", "info", "notice", "warning", "error" or "fault". For example "error" keeps errors and faults (not 'severity' or 'level').`),
-  matchCase: bool(`true makes capitals matter in query; left out, capitals are ignored. ${BOOLEAN}`),
+const utc = () => bool('true: all times in UTC.');
+const bundle = () => str("Id from availableBundles in excel_diag_summary (not 'name').");
+// The arguments excel_diag_search, excel_diag_count and excel_diag_histogram share, described for search. count and
+// histogram point to it, apart from what a model gets wrong without being told there too. Each tool gets its own copy.
+const filters = (full) => ({
+  query: str(full ? `All these words; also "a phrase", -word, /regex/, tag:memory, process:excel (not 'q').` : "Words, as in excel_diag_search (not 'q')."),
+  from: str(`Start of the span, ${AS_PRINTED} (not 'start' or 'since').`),
+  to: str(`End of the span, ${AS_PRINTED} (not 'end' or 'until').`),
+  aroundId: int(full ? 'Centre on this entry id; window is the time either side.' : 'As in excel_diag_search.'),
+  aroundTime: str(`Centre on this time, ${AS_PRINTED}.`),
+  window: str(full ? 'Length either side of aroundId or aroundTime, e.g. "30s".' : 'As in excel_diag_search.'),
+  minSeverity: str(full ? "Lowest kept: debug, info, notice, warning, error or fault (not 'severity')." : "As in excel_diag_search (not 'severity')."),
+  matchCase: bool(full ? 'true: capitals in query must match.' : 'As in excel_diag_search.'),
   utc: utc(),
   bundle: bundle(),
 });
@@ -73,99 +91,106 @@ const FILTER_SHAPE = 'query?, from?, to?, aroundId?, aroundTime?, window?, minSe
 export const TOOLS = [
   {
     name: 'excel_diag_summary',
-    description: `Describe a diagnostics bundle: {utc?, bundle?}. Start with {} for the newest bundle; {utc: true} prints times in UTC. Returns entries (log entries on the timeline), period (first and last entry time), timeZone, counts by severity and by tag, the busiest processes, how many report files there are, and availableBundles: the ids to copy into bundle (an id, not a path or 'name'). Then one line per log source.`,
+    description: 'Describe a bundle: {utc?, bundle?}. Start with {}: entries, period, timeZone, counts, reports, what the collection recorded, and availableBundles, newest first by id date.',
     parameters: schema({ utc: utc(), bundle: bundle() }),
   },
   {
     name: 'excel_diag_search',
-    description: `List log entries that meet every condition: {${FILTER_SHAPE}, limit?, offset?, newest?, maxChars?}, e.g. {query: "pivot cache", minSeverity: "error"} (query, not 'q' or 'pattern'). Returns matched of total and one line per entry, oldest first. The ID column gives the id for excel_diag_show and excel_diag_context. truncated:true means more matched than are listed.`,
+    description: `List entries that meet every condition: {${FILTER_SHAPE}, limit?, offset?, newest?, maxChars?}, e.g. {query: "pivot", minSeverity: "error"} (not 'q' or 'pattern'); ids are in the ID column; truncated:true means more matched.`,
     parameters: schema({
-      ...filters(),
-      limit: int(`How many entries to list in this call: ${WHOLE} (not 'count' or 'max'). When more match, the result has truncated:true and nextOffset.`),
-      offset: int(`How many matches to skip from the first: ${WHOLE}. Copy nextOffset from the previous result (not 'page' or 'skip'). Not together with newest.`),
-      newest: bool(`true lists the last matches instead of the first. Not together with offset. ${BOOLEAN}`),
-      maxChars: int(`How many characters of each message to print on its line: ${WHOLE}. A longer message ends with …[N more characters]; read it with excel_diag_show.`),
+      ...filters(true),
+      limit: int(`Entries to list: ${WHOLE} (not 'count').`),
+      offset: int(`Matches to skip: ${WHOLE}; copy nextOffset.`),
+      newest: bool('true: the last matches; not with offset.'),
+      maxChars: int(`Characters per message line: ${WHOLE}.`),
     }),
   },
   {
     name: 'excel_diag_count',
-    description: `Count log entries that meet every condition: {${FILTER_SHAPE}, by?, limit?}. Filters work as in excel_diag_search. by is what to count by, e.g. {by: "process"} (not 'groupBy' or 'field'): returns values with the entries of each, largest first, and moreValues, how many more values exist. Without by: the largest values by severity, source, tag and process.`,
+    description: `Count entries that meet every condition: {${FILTER_SHAPE}, by?, limit?}, e.g. {by: "message"} (not 'groupBy'); without by, the top severities, sources, tags and processes.`,
     parameters: schema({
-      ...filters(),
-      by: str(`What to count by: "severity", "level", "source", "tag", "process", "subsystem", "category" or "file". For example "process" (not 'groupBy' or 'field').`),
-      limit: int(`How many values to list when by is given: ${WHOLE}. moreValues in the result is how many further values exist.`),
+      ...filters(false),
+      by: str("message (by its shape), severity, level, source, tag, process, subsystem, category or file (not 'groupBy')."),
+      limit: int(`Values to list, with by: ${WHOLE}.`),
     }),
   },
   {
     name: 'excel_diag_histogram',
-    description: `Count entries per time interval: {${FILTER_SHAPE}, bins?}, e.g. {minSeverity: "warning"}. Filters work as in excel_diag_search; bins is the most intervals to make (not 'buckets'). Returns a line per interval with entries (START, ENTRIES, ERRORS, WARNINGS) and fullest, the interval with the most: copy fullest.from and fullest.to into from and to of excel_diag_search.`,
+    description: `Count entries per time interval: {${FILTER_SHAPE}, bins?}, e.g. {minSeverity: "warning"} (not 'buckets'); fullest.from and fullest.to go into excel_diag_search.`,
     parameters: schema({
-      ...filters(),
-      bins: int(`The most intervals to split the span into: ${WHOLE} (not 'buckets' or 'interval'). Each interval is a whole number of seconds long, so there can be fewer.`),
+      ...filters(false),
+      bins: int(`Most intervals: ${WHOLE} (not 'buckets').`),
     }),
   },
   {
     name: 'excel_diag_show',
-    description: `Read one log entry in full: {id, maxChars?, utc?, bundle?}. id is the number in the ID column of excel_diag_search or excel_diag_context results, e.g. 15501 (not 'entry' or 'index'). Returns its fields (time, severity, source, process and more) and its message; truncated:true means the message is longer than what is shown, so send a larger maxChars.`,
+    description: "Read one entry whole: {id, maxChars?, utc?, bundle?}, e.g. {id: 15501} from the ID column of excel_diag_search or excel_diag_context (not 'entry' or 'index'); truncated:true means send a larger maxChars.",
     parameters: schema({
-      id: int(`Entry id: the number in the ID column of excel_diag_search or excel_diag_context results, e.g. 15501 (not 'entry' or 'index'). Copy it; do not guess one.`),
-      maxChars: int(`How many characters of the message to return: ${WHOLE}. Send a larger one when the result has truncated:true; messageChars is the message's full length.`),
+      id: int("Entry id from the ID column; never guess (not 'entry')."),
+      maxChars: int(`Characters of the message: ${WHOLE}.`),
       utc: utc(),
       bundle: bundle(),
     }),
   },
   {
     name: 'excel_diag_context',
-    description: `Show what every source logged around one entry or one moment: {id?, time?, before?, after?, window?, maxChars?, utc?, bundle?}. Send id or time, not both. id is a number from the ID column of excel_diag_search, e.g. 15501 (not 'entry' or 'aroundId'); time is ${AS_PRINTED}. No query applies. Returns one line per entry, with > before the anchor entry; truncated:true means more was logged there than is listed.`,
+    description: `List what every source logged around an entry or moment: {id?, time?, before?, after?, window?, maxChars?, utc?, bundle?}, e.g. {id: 15501} from the ID column of excel_diag_search (not 'entry' or 'aroundId') or a time ${AS_PRINTED}; truncated:true means more was logged there.`,
     parameters: schema({
-      id: int(`Entry to centre on: a number from the ID column of excel_diag_search results, e.g. 15501 (not 'entry' or 'aroundId'). Send id or time, not both.`),
-      time: str(`Moment to centre on, ${AS_PRINTED}, e.g. "2026-03-10 10:35:00" (not 'aroundTime' or 'at'). Send time or id, not both.`),
-      before: int(`How many entries before the anchor to list: ${WHOLE}. Not used when window is given.`),
-      after: int(`How many entries after the anchor to list: ${WHOLE}. Not used when window is given.`),
-      window: str(`List what was logged within this length of time either side, in place of before and after: a number and a unit in one string, e.g. "30s", "1m" or "1h".`),
-      maxChars: int(`How many characters of each message to print on its line: ${WHOLE}. A longer message ends with …[N more characters]; read it with excel_diag_show.`),
+      id: int("Entry id to centre on; or send time (not 'entry')."),
+      time: str(`Moment to centre on, ${AS_PRINTED} (not 'aroundTime').`),
+      before: int(`Entries before the anchor: ${WHOLE}.`),
+      after: int(`Entries after the anchor: ${WHOLE}.`),
+      window: str('In place of before and after: entries within this long either side, e.g. "30s".'),
+      maxChars: int(`Characters per message line: ${WHOLE}.`),
       utc: utc(),
       bundle: bundle(),
     }),
   },
   {
     name: 'excel_diag_reports',
-    description: `List the crash, hang and other diagnostic report files of a bundle: {utc?, bundle?}. Call it with {}; {utc: true} prints times in UTC. Returns reports (how many the bundle holds), byKind, and one line per report, oldest first: TIME, KIND, PROCESS, FILE. Copy FILE into path of excel_diag_read_file to read a report, or TIME into time of excel_diag_context. truncated:true means the bundle holds more reports than are listed.`,
-    parameters: schema({ utc: utc(), bundle: bundle() }),
+    description: 'List crash, hang and other report files: {path?, utc?, bundle?}. Call it with {}; ID goes into id of excel_diag_context, and FILE into path to lay that report out; truncated:true means more reports.',
+    parameters: schema({ path: str("From the FILE column: that report laid out (not 'filename')."), utc: utc(), bundle: bundle() }),
   },
   {
     name: 'excel_diag_files',
-    description: `List the files in a bundle: {filter?, limit?, offset?, bundle?}. filter keeps the paths that contain it, capitals ignored, e.g. {filter: "reports"} (not 'query', 'path' or 'pattern'). Returns one line per file: SIZE, TIMELINE_ENTRIES (entries that came from it; - when it is not on the timeline) and PATH. Copy PATH into path of excel_diag_read_file. truncated:true means more files than are listed: send nextOffset as offset.`,
+    description: "List a bundle's files: {filter?, limit?, offset?, bundle?}, e.g. {filter: \"reports\"} (not 'query' or 'pattern'); copy PATH into path of excel_diag_read_file; truncated:true means send nextOffset as offset.",
     parameters: schema({
-      filter: str(`Keep only the file paths that contain this text, capitals ignored, e.g. "reports" (not 'query', 'path' or 'pattern').`),
-      limit: int(`How many files to list in this call: ${WHOLE} (not 'count' or 'max').`),
-      offset: int(`How many files to skip from the first: ${WHOLE}. Copy nextOffset from the previous result (not 'page' or 'skip').`),
+      filter: str("Keep paths that contain this (not 'pattern')."),
+      limit: int(`Files to list: ${WHOLE}.`),
+      offset: int(`Files to skip: ${WHOLE}; copy nextOffset.`),
       bundle: bundle(),
     }),
   },
   {
     name: 'excel_diag_read_file',
-    description: `Read lines of one file in a bundle: {path, fromLine?, limit?, grep?, bundle?}. path is copied from the PATH column of excel_diag_files or the FILE column of excel_diag_reports, e.g. "summary.md" (not 'file' or 'filename'). grep keeps only the lines that contain it. Returns lines (how many the file has) and the lines read; truncated:true means more follow: send nextFromLine as fromLine. A file that is not text gives the error "binary file".`,
+    description: "Read lines of a bundle file: {path, fromLine?, limit?, grep?, bundle?}, e.g. {path: \"summary.md\"} from the PATH column of excel_diag_files or the FILE column of excel_diag_reports (not 'file' or 'filename'); truncated:true means send nextFromLine as fromLine.",
     parameters: schema({
-      path: str(`Path of a file in the bundle, copied from the PATH column of excel_diag_files or the FILE column of excel_diag_reports, e.g. "summary.md" (not 'file', 'filename' or 'name').`),
-      fromLine: int(`Line to start from: ${WHOLE}; the first line is 1. Copy nextFromLine from the previous result (not 'offset' or 'line').`),
-      limit: int(`How many lines to return in this call: ${WHOLE} (not 'count' or 'lines').`),
-      grep: str(`Keep only the lines that contain this text, capitals ignored, e.g. "exception" (not 'query' or 'pattern'). Each is printed as N: text, where N is its line number.`),
+      path: str("Path from the PATH or FILE column (not 'filename')."),
+      fromLine: int(`First line: ${WHOLE}; copy nextFromLine (not 'offset').`),
+      limit: int(`Lines to return: ${WHOLE}.`),
+      grep: str("Keep lines that contain this (not 'pattern')."),
       bundle: bundle(),
     }),
   },
   {
     name: 'excel_diag_memory',
-    description: `Give the memory records of a bundle as figures: {utc?, bundle?}. Call it with {}; {utc: true} prints times in UTC. Returns files (kind, path, bytes: copy a path into path of excel_diag_read_file), timeline when the bundle has a memory timeline (for Excel's footprint, CPU and threads, free memory and swap: the lowest and highest value with the time of each, and the last value), and memoryEntries, how many log entries are tagged memory.`,
-    parameters: schema({ utc: utc(), bundle: bundle() }),
+    description: "Memory figures: {time?, from?, to?, utc?, bundle?}. Call it with {}: files, the timeline's lowest, highest and last values, when each pressure level was seen; time lists samples.",
+    parameters: schema({
+      time: str(`Samples nearest this, ${AS_PRINTED} (not 'aroundTime').`),
+      from: str(`Start of the span, ${AS_PRINTED} (not 'start' or 'since').`),
+      to: str(`End of the span, ${AS_PRINTED} (not 'end' or 'until').`),
+      utc: utc(),
+      bundle: bundle(),
+    }),
   },
 ];
 
-// The six everyday tools stay in the model's tool list with their schemas. A deferred tool is reached through the
-// host's tool_call wrapper, where the arguments travel as a nested object and a search text full of quotation
-// marks and backslashes has to survive one more layer of escaping; a small model gets that wrong. The other four
-// are used less often and stay deferred, which keeps the tool list short.
-export const DIRECT_TOOLS = new Set(['excel_diag_summary', 'excel_diag_search', 'excel_diag_show', 'excel_diag_context', 'excel_diag_reports', 'excel_diag_read_file']);
+// Every tool stays in the model's tool list with its schema (direct-only). A deferred tool is reached through the
+// host's tool_call wrapper, where the arguments travel as a nested object and a search text full of quotation marks
+// and backslashes has to survive one more layer of escaping: a small model gets that wrong, and it calls a deferred
+// tool by its bare name all the same. The descriptions above are short enough that the ten, as registered, take
+// less of the model's context than the six direct ones did when four were deferred.
+export const DIRECT_TOOLS = new Set(TOOLS.map((t) => t.name));
 
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 
@@ -274,9 +299,10 @@ function runProgram(request, { cliPath, timeoutMs, signal }) {
 // exit status or anything the program wrote.
 const NO_ANSWER = 'the Excel diagnostics program did not answer';
 const NO_ANSWER_HINT = {
-  timeout: 'The call took longer than this tool allows and was stopped: send it once more with a shorter time span (from and to) or with a smaller bundle, or tell the human that this bundle is too slow to search here.',
+  // Neither says why the call took that long: the program was stopped before it could say, so nothing here knows.
+  timeout: 'The call took longer than this tool allows and was stopped, so it gave no result. A shorter time span (from and to) gives it fewer entries to look through: send it once more with one, or tell the human that this call could not be answered in the time this tool allows.',
   // For a tool that takes no time span: naming one would send the model after an argument the tool does not have.
-  timeoutWhole: 'The call took longer than this tool allows and was stopped: send it once more with a smaller bundle, or tell the human that this bundle is too slow to search here.',
+  timeoutWhole: 'The call took longer than this tool allows and was stopped, so it gave no result: tell the human that this call could not be answered in the time this tool allows, and do not send the same call again.',
   missing: 'The program behind the excel_diag tools is not installed on the OpenClaw host: tell the human to run the Excel diagnostics installer again, and do not call these tools until the human says that is done.',
   start: 'The program behind the excel_diag tools could not be started on the OpenClaw host: tell the human, and do not call these tools again until the human says it is fixed.',
   cancelled: 'The call was cancelled before the program answered: send it again only if its result is still needed.',
@@ -284,6 +310,9 @@ const NO_ANSWER_HINT = {
   plugin: 'The tool failed before the program could answer: tell the human that this call could not be answered, and do not send the same call again.',
 };
 const noAnswer = (cause) => ({ ok: false, error: NO_ANSWER, hint: NO_ANSWER_HINT[cause] });
+// The tools whose work a shorter time span makes smaller: they look through the entries in it. The memory call takes
+// a span too, but reads its whole file whatever span it is sent.
+const SPANNED = new Set(['excel_diag_search', 'excel_diag_count', 'excel_diag_histogram']);
 
 const block = (text) => ({ type: 'text', text });
 // The details as the one JSON line the model reads. A value from a bundle (its id, a name, a path) can hold a
@@ -298,15 +327,37 @@ const escaped = (n) => (n >= 127 && n <= 159) || n === 0x2028 || n === 0x2029 ||
   || n === 0xad || n === 0x34f || n === 0x61c || n === 0x115f || n === 0x1160 || n === 0x17b4 || n === 0x17b5 || (n >= 0x180b && n <= 0x180f)
   || (n >= 0x200b && n <= 0x200f) || (n >= 0x2060 && n <= 0x206f) || n === 0x3164 || (n >= 0xfe00 && n <= 0xfe0f) || n === 0xfeff || n === 0xffa0
   || (n >= 0xfff0 && n <= 0xfffb) || (n >= 0x1bca0 && n <= 0x1bca3) || (n >= 0x1d173 && n <= 0x1d17a) || (n >= 0xe0000 && n <= 0xe0fff);
+const escapeOf = (c) => c.split('').map((u) => `\\u${u.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
 function jsonLine(v) {
   let out = '';
-  for (const c of JSON.stringify(v)) out += escaped(c.codePointAt(0)) ? c.split('').map((u) => `\\u${u.charCodeAt(0).toString(16).padStart(4, '0')}`).join('') : c;
+  for (const c of JSON.stringify(v)) out += escaped(c.codePointAt(0)) ? escapeOf(c) : c;
   return out;
 }
-// The names are said back bare, as the model wrote them, in one sentence it can act on.
-function ignoredSaid(tool, names) {
+// Each fact is one line, whatever it says back. The program writes its notes so, but a name the model sent is said back
+// bare, and it can hold a line break as much as a bundle can: left as it is, it would start a line of the facts with
+// whatever followed it. So every kind of line break in a fact is written as \n, and a control character or one the
+// JSON line escapes as its escape.
+const BREAK = /\r\n?|[\n\v\f\u0085\u2028\u2029]/g;
+function factLine(s) {
+  let out = '';
+  for (const c of s.replace(BREAK, '\\n')) { const n = c.codePointAt(0); out += (n < 32 && n !== 9) || escaped(n) ? escapeOf(c) : c; }
+  return out;
+}
+// The names are said back bare, as the model wrote them, in one sentence it can act on: the first IGNORED_SAID of
+// them, each cut to IGNORED_NAME_MOST characters, and how many more there were. In that sentence each is one line
+// (factLine), cut again once that is done, so that what it adds to a result stays within LAID_ROUND.
+// The cut is never through the middle of a character: a character past U+FFFF is two units, and one of them alone is
+// no character, which a host that writes the result as UTF-8 cannot write.
+const nameSaid = (k) => {
+  if (k.length <= IGNORED_NAME_MOST) return k;
+  const n = k.charCodeAt(IGNORED_NAME_MOST - 1) >= 0xd800 && k.charCodeAt(IGNORED_NAME_MOST - 1) <= 0xdbff ? IGNORED_NAME_MOST - 1 : IGNORED_NAME_MOST;
+  return `${k.slice(0, n)}\u2026`;
+};
+function ignoredSaid(tool, given, more) {
+  const names = given.map((k) => nameSaid(factLine(k)));
   if (names.length === 1) return `${names[0]} is not a field of ${tool} and was ignored, so this result is not narrowed by it. Send the call again with one of the allowed fields if it mattered.`;
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are not fields of ${tool} and were ignored, so this result is not narrowed by them. Send the call again with the allowed fields if they mattered.`;
+  const all = more ? [...names, `${more} more`] : names;
+  return `${all.slice(0, -1).join(', ')} and ${all[all.length - 1]} are not fields of ${tool} and were ignored, so this result is not narrowed by them. Send the call again with the allowed fields if they mattered.`;
 }
 
 // A failure is one JSON line and nothing else: the error, the argument at fault, and what to send instead.
@@ -334,18 +385,22 @@ function tooLargeSaid(tool, size, known) {
 // A success is up to four blocks in a fixed order. Corrections come first, so the model reads how its call was
 // taken before it reads the result. "Next:" comes last, so what could be done next is the last thing it reads
 // before its own turn. The quoted lines stay plain text between them: inside a JSON string every quotation mark
-// and line break in a log message would be escaped, and a model copies what it sees.
-function success(tool, doc, more, ignored, known) {
+// and line break in a log message would be escaped, and a model copies what it sees. Those lines are the bundle's
+// own text (each line of a file after its number, each line of a message after two spaces), and a file can hold a
+// line that reads like a "Next:" of this tool's. So a result that has no Next ends with a fixed line of this
+// tool's (endSaid), and the bundle's text is never the last thing the model reads.
+const endSaid = (tool) => `End of the ${tool} result.`;
+function success(tool, doc, more, ignored, known, unsaid) {
   const details = { ok: true, tool };
   if (typeof doc.bundle === 'string' && doc.bundle) details.bundle = doc.bundle;
   Object.assign(details, isObject(doc.receipt) ? doc.receipt : {}, more, { ok: true, tool });
   const notes = Array.isArray(doc.notes) ? doc.notes.filter((n) => typeof n === 'string' && n) : [];
-  if (ignored.length) notes.unshift(ignoredSaid(tool, ignored));
+  if (ignored.length) notes.unshift(ignoredSaid(tool, ignored, unsaid));
   const content = [];
-  if (notes.length) content.push(block(`Facts about this call:\n${notes.map((n) => `- Fact: ${n}`).join('\n')}`));
+  if (notes.length) content.push(block(`Facts about this call:\n${notes.map((n) => `- Fact: ${factLine(n)}`).join('\n')}`));
   content.push(block(jsonLine(details)));
   if (typeof doc.text === 'string' && doc.text) content.push(block(doc.text));
-  if (typeof doc.next === 'string' && doc.next) content.push(block(`Next: ${doc.next}`));
+  content.push(block(typeof doc.next === 'string' && doc.next ? `Next: ${doc.next}` : endSaid(tool)));
   // One ceiling on everything handed to the model, whatever the program printed. The program cuts what a bundle
   // can make long; this is the second lock, for anything it did not.
   const size = content.reduce((n, c) => n + c.text.length, 0);
@@ -380,16 +435,17 @@ function repeatGuard(now) {
     try {
       const session = String(event?.sessionKey ?? ctx?.sessionKey ?? event?.runId ?? ctx?.runId ?? 'default');
       let name = event?.toolName, args = event?.params;
-      // A deferred tool arrives inside the host's wrapper, as tool_call {id, args}; the id can carry a prefix that
-      // ends in a colon. It is the same call as the bare one and is counted with it. When the model put the
-      // arguments beside id instead of inside args, the whole wrapper stands in for them.
+      // No tool is deferred, but a host may still hand a call over inside its wrapper, as tool_call {id, args}, and a
+      // model may write one; the id can carry a prefix that ends in a colon. It is the same call as the bare one and
+      // is counted with it. When the model put the arguments beside id instead of inside args, the whole wrapper
+      // stands in for them.
       if (name === 'tool_call' && isObject(args) && typeof args.id === 'string') {
         const target = args.id.slice(args.id.lastIndexOf(':') + 1);
         if (TOOL_NAMES.has(target)) { name = target; args = isObject(args.args) ? args.args : args; }
       }
       if (!TOOL_NAMES.has(name)) { last.delete(session); return undefined; }
       const key = `${name} ${JSON.stringify(isObject(args) ? args : {}, sorted)}`, at = now(), before = last.get(session);
-      // A host may announce one deferred call twice, as the wrapper and then as the tool it names. Counted twice,
+      // A host may announce one wrapped call twice, as the wrapper and then as the tool it names. Counted twice,
       // the model's second identical call would be refused as its third. Two events in a row that carry the same
       // call id are therefore one call; a call the model sends again arrives with a new id and is counted.
       const callId = [event?.toolCallId, ctx?.toolCallId].find((v) => typeof v === 'string' && v);
@@ -417,28 +473,31 @@ export function register(api, deps = {}) {
   const run = typeof d.run === 'function' ? d.run : runProgram;
   if (run === runProgram && !fs.existsSync(cliPath)) log(`${CLI_NAME} was not found beside the plugin, so every tool call will say the program is not installed. Run the installer again.`);
 
-  // Never rejects and never returns a bare object. The host's wrapper for deferred tools checks that a result has
-  // a content array before the model sees anything; a result without one is refused there, the model is shown the
-  // wrapper's complaint in place of the result, and it sends the same correct call again.
+  // Never rejects and never returns a bare object. The host's tool_call wrapper, which a host may still use, checks
+  // that a result has a content array before the model sees anything; a result without one is refused there, the
+  // model is shown the wrapper's complaint in place of the result, and it sends the same correct call again.
   async function answer(tool, known, declared, given, signal) {
     try {
-      // Only declared arguments are sent on, each exactly as it came. A name the tool does not declare is reported
-      // and not passed, so that "was ignored" is true of every tool; nothing is renamed or guessed.
-      const params = {}, ignored = [];
+      // Only declared arguments are sent on as arguments, each exactly as it came; nothing is renamed or guessed. A name
+      // the tool does not declare is sent apart from them (undeclared), for the program to refuse when it stands for an
+      // argument of another name (q for query), and is never read as an argument: so every such name narrowed nothing,
+      // and is reported so (ignoredFields), whatever tool it was sent to and whether the call ran or was refused.
+      const params = {}, undeclared = {}, ignored = [];
       for (const key of Object.keys(isObject(given) ? given : {})) {
         if (known.has(key)) params[key] = given[key];
-        else ignored.push(key);
+        else { undeclared[key] = given[key]; ignored.push(key); }
       }
-      const more = ignored.length ? { ignoredFields: ignored, allowedFields: [...declared] } : {};
-      const request = { format: 1, op: tool.slice(PREFIX.length), bundlesDir, ...(cacheDir ? { cacheDir } : {}), params };
+      const said = ignored.slice(0, IGNORED_SAID).map(nameSaid), unsaid = ignored.length - said.length;
+      const more = ignored.length ? { ignoredFields: said, allowedFields: [...declared] } : {};
+      const request = { format: 1, op: tool.slice(PREFIX.length), bundlesDir, ...(cacheDir ? { cacheDir } : {}), params, ...(ignored.length ? { undeclared } : {}) };
       const outcome = await run(request, { cliPath, timeoutMs, signal });
       const doc = documentOf(outcome);
-      if (doc && doc.ok === true) return success(tool, doc, more, ignored, known);
+      if (doc && doc.ok === true) return success(tool, doc, more, said, known, unsaid);
       if (doc && doc.ok === false && typeof doc.error === 'string' && doc.error) return failure(tool, doc, more);
       const cause = outcome?.cause === 'timeout' || outcome?.cause === 'cancelled' ? outcome.cause
         : run === runProgram && !fs.existsSync(cliPath) ? 'missing' : outcome?.cause === 'start' ? 'start' : 'silent';
       log(`${tool} got no answer from the program (${cause}${cause === 'timeout' ? ` after ${timeoutMs / 1000} s` : ''}, exit status ${outcome?.code ?? 'none'}).`);
-      return failure(tool, noAnswer(cause === 'timeout' && !known.has('from') ? 'timeoutWhole' : cause), more);
+      return failure(tool, noAnswer(cause === 'timeout' && !SPANNED.has(tool) ? 'timeoutWhole' : cause), more);
     } catch (err) {
       // Anything can be thrown, a value that cannot be turned into text included, and this path must still answer.
       let said = 'an error that cannot be shown';

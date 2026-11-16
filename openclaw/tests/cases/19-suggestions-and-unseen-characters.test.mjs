@@ -154,14 +154,15 @@ describe('characters that take no room are written by their number wherever a na
   });
 
   it('through the plugin: exactly those characters are written as escapes, for every code point of planes 0, 1 and 14', async () => {
-    // The program is stood in for, so that the plugin is handed every code point as a value of a result.
+    // The program is stood in for, so that the plugin is handed every code point as a value of a result: a thousand at a
+    // time, so that each result, written with its escapes, is less than the most one result may be.
     let doc = null;
     const p = await loadPlugin({ sample: false, deps: { run: async () => ({ code: 0, stdout: JSON.stringify(doc) }) } });
     let checked = 0;
     for (const [from, to] of [[0x20, 0xffff], [0x10000, 0x1ffff], [0xe0000, 0xeffff]]) {
-      for (let a = from; a <= to; a += 8192) {
+      for (let a = from; a <= to; a += 1024) {
         let s = '';
-        for (let n = a; n < Math.min(a + 8192, to + 1); n++) if (n < 0xd800 || n > 0xdfff) { s += cp(n); checked++; }
+        for (let n = a; n < Math.min(a + 1024, to + 1); n++) if (n < 0xd800 || n > 0xdfff) { s += cp(n); checked++; }
         doc = { ok: true, bundle: 'b', notes: [], receipt: { s } };
         const env = await p.raw.get('excel_diag_files')({}), facts = blocks(env).find((t) => t.startsWith('{'));
         assert.equal(env.isError, undefined, JSON.stringify(env.details).slice(0, 200));
@@ -214,21 +215,21 @@ describe('characters that take no room are written by their number wherever a na
 });
 
 describe('the facts of one result stay within their size as the plugin writes them', () => {
-  it('a receipt full of characters written as escapes stays near 24,000 characters', async () => {
+  it('a receipt full of characters written as escapes stays near 7,000 characters', async () => {
     // 60 processes, each named Pnn and then 600 tag characters: 1,203 UTF-16 units, of which the plugin writes each of
     // the 1,200 as 6. Counted as JSON leaves them, the receipt would be cut one step too few and be six times its size.
     const dir = await emptyDir('escapes'), lines = [], odd = cp(0xe0041).repeat(600);
     for (let i = 0; i < 60; i++) lines.push(JSON.stringify({ timestamp: `2026-03-10 09:00:${z2(i)}.000000-0400`, messageType: 'Default', processImagePath: `/usr/bin/P${z2(i)}${odd}`, processID: 5, subsystem: 's', category: 'c', eventMessage: `pivot ${i}` }));
     await put(path.join(dir, 'Escaped_names'), 'logs/a.ndjson', `${lines.join(LF)}${LF}`);
-    const p = await loadPlugin({ bundlesDir: dir }), env = await p.raw.get('excel_diag_count')({ by: 'process', limit: 60 });
+    const p = await loadPlugin({ bundlesDir: dir }), env = await p.raw.get('excel_diag_count')({ by: 'process', limit: 40 });
     assert.equal(env.isError, undefined, JSON.stringify(env.details).slice(0, 300));
     const facts = blocks(env).find((t) => t.startsWith('{'));
-    assert.ok(facts.split(`${BS}udb40${BS}udc41`).length > 1000, 'the case has escapes to count');
+    assert.ok(facts.split(`${BS}udb40${BS}udc41`).length > 200, 'the case has escapes to count');
     assert.ok(!RAW_UNSEEN(facts), 'and none of the tag characters is passed on as it is');
-    assert.ok(facts.length <= 24000 + 200, `the facts came to ${facts.length} characters`);
-    assert.ok(facts.length > 12000, `the facts came to ${facts.length} characters: cut further than they had to be`);
+    assert.ok(facts.length <= 7000 + 200, `the facts came to ${facts.length} characters`);
+    assert.ok(facts.length > 3000, `the facts came to ${facts.length} characters: cut further than they had to be`);
     assert.equal(env.details.truncated, true);
-    assert.ok(blocks(env).join('').length < 30000);
+    assert.ok(blocks(env).join('').length < p.module.RESULT_MOST);
   });
 
   it('a refusal that gives candidates gives as many whole paths as fit, and says how many', async () => {
@@ -241,9 +242,9 @@ describe('the facts of one result stay within their size as the plugin writes th
     assert.equal(env.details.error, 'path matches more than one file');
     const facts = blocks(env)[0], n = env.details.candidates.length;
     assert.equal(blocks(env).length, 1);
-    assert.ok(facts.length <= 24000 + 200, `the refusal came to ${facts.length} characters`);
+    assert.ok(facts.length <= 7000 + 200, `the refusal came to ${facts.length} characters`);
     assert.ok(n >= 2 && n < 20, `${n} candidates`);
-    assert.ok(facts.length > 24000 - 2 * asWritten(paths[0]).length, `the refusal came to ${facts.length} characters: fewer candidates than fit`);
+    assert.ok(facts.length > 7000 - asWritten(paths[0]).length, `the refusal came to ${facts.length} characters: fewer candidates than fit`);
     assert.deepEqual(env.details.candidates, paths.slice(0, n), 'each candidate is a whole path, in the order files lists them');
     assert.deepEqual(JSON.parse(facts), env.details);
     assert.ok(!RAW_UNSEEN(facts));

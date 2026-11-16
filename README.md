@@ -109,7 +109,7 @@ The user controls their home folder, so the collector trusts nothing there.
 - It reads the home folder with the user's rights, under time limits (30 minutes in all). After one read times out, nothing more is read with those rights, except the workbook's own facts.
 - Outside the home folder, it takes a file only as itself: not through a link, a linked folder or a second name.
 - It builds the bundle in a root-only folder under `/private/var/tmp`. At the end it moves the results with the user's rights, unless only root can write to the destination. If a result name is already taken there, nothing is moved.
-- It caps what the user can make large. A copied log file over 1 GB is left out (over 250 MB for other Microsoft logs it finds), and so are a log folder's largest files past 4 GB. Each unified-log search is cut at 2 GB, and `repro`'s live stream at 10 GB.
+- It caps what the user can make large. A copied log file over 1 GB is left out (over 250 MB for other Microsoft logs it finds), and so are a log folder's largest files past 4 GB. Each unified-log search is cut at 2 GB. The rows written from what was kept can come to up to three times its size. `repro`'s live stream is cut at 10 GB.
 - A process counts as Excel only by its owner (the console user) and its program file, never by its name.
 
 ## Exit statuses
@@ -132,6 +132,7 @@ Drop a bundle's zip, its folder, or single log files on the [viewer](https://cad
 - **Nothing is uploaded.** The page's Content-Security-Policy refuses network requests. You can save `index.html` and open it offline.
 - **Tabs:** Timeline (every log with timestamps, merged by time, with search and filters), Files and Overview. Reports and Memory appear when the bundle has reports or memory records.
 - **Times** are shown in the time zone of the Mac the bundle came from. The "Times in" menu switches to UTC or your own zone.
+- **Search** takes words, "a phrase", a `/regex/` and fields such as `process:excel`, and lists the entries that match all of them. A `/regex/` is read by the tool's own reader, one entry at a time. It reads each character once, in no more steps than the pattern has, so the time a search takes grows with how much it reads, whatever the pattern. A `/regex/` with a look-ahead, a look-behind or a back-reference (`\1`) is left out of the search, and a note says so. So is one that comes to more than 2,000 steps as the reader counts them. A character, a class such as `[a-z]` or `\d`, and an anchor such as `^` or `\b` are one step each. A counted repeat such as `x{2,30}` counts as 30 copies of `x`, with one step more for each copy past the first 2. `x?` counts as `x` and one step more, `x*` as `x` and two more, and `x+` as two copies of `x` and two more. Each `|` adds two steps. A repeated part that can only match nothing, such as `(?:)` or `(?:\b)`, counts once at most, whatever its count, since it matches the same each time. Each entry is matched as it is shown: read as UTF-8, without the line end at its end. So `.` and `[é]` each match the one character `é`, capitals are ignored as JavaScript ignores them, and `/^$/` matches only an entry with an empty line.
 - **Hatching** on the Timeline chart marks time the bundle has no macOS log for, such as a day whose search was cut short. It is not a quiet stretch.
 - **Export** writes one row per entry, with times in UTC. A field that starts with `=`, `+`, `-`, `@` or `"` gets an apostrophe in front, so a spreadsheet does not run it.
 - **Large bundles:** over about 1 GB, unzip first and drop the folder.
@@ -160,11 +161,13 @@ node excel_diagnostics_cli.mjs help examples
 
 - `sample` in place of a bundle opens made-up data.
 - Most commands end with a "Next:" list of commands to run next, ready to copy.
+- `search` reads its words as the viewer does, with the same reader for a `/regex/`, and leaves out the same patterns, with a note. A time with a part that cannot be, such as month 13 or minute 99, is refused with an example.
+- `request` mode, which the OpenClaw tools use, takes a query of at most 100 terms and 10,000 characters. A phrase in quotation marks is one term.
 - A zip is unpacked once into `excel_diagnostics_cli` in the system's temporary folder and kept for later commands. `node excel_diagnostics_cli.mjs clean` deletes those copies.
 
 ## OpenClaw
 
-`openclaw/` holds a plugin with ten read-only `excel_diag_*` tools and a skill, over the command-line tool. The agent reads bundles from one folder on the OpenClaw host; a call that names no bundle reads the one that changed last. It has not yet run in a live OpenClaw Gateway. See [`openclaw/INSTALL.md`](openclaw/INSTALL.md).
+`openclaw/` holds a plugin with ten read-only `excel_diag_*` tools and a skill, over the command-line tool. The agent reads bundles from one folder on the OpenClaw host; a call that names no bundle reads the newest, by the date and time in its id, then by when it was copied there. It has not yet run in a live OpenClaw Gateway. See [`openclaw/INSTALL.md`](openclaw/INSTALL.md).
 
 ## Developing
 
@@ -186,6 +189,6 @@ The engine and viewer suites also run with `node`.
 - The parts that look at Excel itself (its logs, finding it running, `hang`'s capture) are tested with stand-ins only.
 - The tests never run as root.
 - Only Excel in `/Applications` is looked for.
-- Bundles from collectors before 1.5.0 can hold a PivotTable sentence nobody typed. The viewer marks such a file; the command-line tool and the agent print it as it is.
+- Bundles from collectors before 1.5.0 can hold a "Case" line and sentences about a PivotTable crash that the collector wrote itself. Wherever the viewer, the command-line tool and the agent tools show that file, they say so. They call the text under a heading the collector's only when it is word for word what that collector wrote there, up to the next heading. A file that opens as the 1.5.0 collector writes it and also has those older lines is said to have both.
 - A note given with `--note` to a run that uses sudo, or typed before the script re-runs itself with sudo, is on a `sudo` command line. macOS logs that line, and a bundle can include it.
 - OneDrive's binary `.odl` logs and `.logarchive` bundles are not read by the viewer or the tool.

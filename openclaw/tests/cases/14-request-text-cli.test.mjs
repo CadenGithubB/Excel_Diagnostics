@@ -127,7 +127,7 @@ const EXPECTED = [
     args: ['sample', 'reports'],
     stdout: [
       '2 reports in this bundle, oldest first. Times are in the logged Mac\'s time zone, UTC-04:00 (add --utc for UTC).',
-      'Each is one file that macOS or Excel wrote when the thing happened; KIND is taken from the file.',
+      'Each is a report as its file records it, and KIND is taken from the file. A force-quit file can record more than one, and excel_sample.txt and excel_spindump.txt are read as the capture of Excel that the collector takes in hang mode.',
       '',
       'TIME                 KIND    PROCESS          FILE',
       '2026-03-10 10:32:30  Jetsam  JetsamEvent      reports/Library_Logs_DiagnosticReports/JetsamEvent-2026-03-10-103230.ips',
@@ -220,7 +220,7 @@ describe('text command line: unchanged by request mode', () => {
     assert.equal(r.code, 0);
     const lines = normal(r.stdout).split('\n'), added = 'For programs: "CLI request" reads one JSON request from standard input and prints one JSON document in answer.';
     assert.equal(lines.filter((l) => l === added).length, 1);
-    assert.deepEqual(lines.filter((l) => l !== added).slice(0, 3), ['Excel diagnostics, command-line tool 1.1', '', 'Searches a bundle made by excel_diagnostics.sh (the collector for Excel slowdowns, hangs and crashes on macOS)']);
+    assert.deepEqual(lines.filter((l) => l !== added).slice(0, 3), ['Excel diagnostics, command-line tool 1.2', '', 'Searches a bundle made by excel_diagnostics.sh (the collector for Excel slowdowns, hangs and crashes on macOS)']);
     assert.equal(lines.length, 37, 'one line more than before');
     assert.ok(lines.indexOf(added) === lines.findIndex((l) => l.startsWith('Exit status:')) + 1, 'it sits with the other notes for callers');
   });

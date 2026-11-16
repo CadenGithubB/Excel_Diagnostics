@@ -92,6 +92,8 @@ body.drag .dropzone, body.drag #app { outline: 3px solid var(--accent); outline-
 .histhead i, #histTip i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 .histhead input { width: 150px; font-family: var(--mono); font-size: 11.5px; padding: 2px 6px; }
 .histhead button { padding: 1px 8px; font-size: 12px; }
+.histhead input[aria-invalid="true"] { border-color: var(--critical); }
+#tNote { margin: 2px 0 4px; padding: 3px 10px; border-left: 3px solid var(--critical); background: var(--surface); border-radius: 0 6px 6px 0; color: var(--ink2); font-size: 12px; overflow-wrap: anywhere; }
 #hist { height: 168px; cursor: crosshair; touch-action: none; user-select: none; overflow: hidden; }
 .hatch { stroke: var(--ink); stroke-width: 1.5; opacity: .17; }
 .nolog, .g, .gline, .lane { pointer-events: none; }

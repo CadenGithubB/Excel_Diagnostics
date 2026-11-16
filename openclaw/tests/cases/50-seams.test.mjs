@@ -18,6 +18,7 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { describe, it, assert, loadPlugin, request, sampleBundlesDir, emptyDir, blocks, cleanup, exists, PLUGIN_DIR, CLI_PATH, SKILL_PATH, SAMPLE_ID } from '../harness.mjs';
 import { install, PLUGIN_ID, SKILL_NAME, TOOL_NAMES } from '../../plugin/install.mjs';
+import { writeIncomplete, INCOMPLETE } from '../made-up.mjs';
 
 const PREFIX = 'excel_diag_';
 const CLI_FILE = 'excel_diagnostics_cli.mjs';
@@ -83,14 +84,16 @@ async function corpus() {
     ['search', { query: 'proces:excel pivot', from: '2026-03-10 09:00', to: '2026-03-10 09:01' }], ['search', { query: 'zzzzqq' }],
     ['search', { query: 'process:nosuchprocess' }], ['search', { query: 'pivot', matchCase: true, minSeverity: 'fault' }],
     ['search', { aroundId: entry, window: '5s', minSeverity: 'error', utc: true }], ['search', { query: 'pivot', limit: 500, bundle: 'sample' }],
-    ['search', { severity: 'error', limit: 2 }],
+    ['search', { terms: 'error', limit: 2 }],
     ['count', {}], ['count', { by: 'process', minSeverity: 'error' }], ['count', { by: 'tag' }], ['count', { by: 'file' }], ['count', { by: 'subsystem', limit: 2 }],
-    ['count', { query: 'zzzzqq', minSeverity: 'error' }],
+    ['count', { query: 'zzzzqq', minSeverity: 'error' }], ['count', { by: 'message' }], ['count', { by: 'message', minSeverity: 'error', limit: 3, utc: true }],
+    ['count', { by: 'message', aroundTime: '2026-03-10 10:35:00', window: '1m' }],
     ['histogram', { query: 'tag:memory' }], ['histogram', { aroundTime: '2026-03-10 10:35:00', window: '2m', bins: 5 }], ['histogram', { minSeverity: 'fault', utc: true }],
     ['show', { id: entry }], ['show', { id: report }], ['show', { id: entry, maxChars: 10, utc: true }],
     ['context', { id: entry }], ['context', { time: '2026-03-10 10:32:30', window: '2s' }], ['context', { time: '2026-03-10 10:35:00', window: '1s' }],
     ['context', { time: '2026-03-10 10:35:10', window: '1ms' }], ['context', { id: entry, before: 2, after: 2, utc: true, bundle: 'sample' }],
-    ['reports', {}], ['reports', { utc: true }],
+    ['reports', {}], ['reports', { utc: true }], ['reports', { path: 'reports/user_Library_Logs_DiagnosticReports/Microsoft Excel-2026-03-10-103500.ips' }],
+    ['reports', { path: 'JetsamEvent-2026-03-10-103230.ips', utc: true }], ['read_file', { path: 'Microsoft Excel-2026-03-10-103500.ips', limit: 3 }],
     ['files', {}], ['files', { filter: 'report' }], ['files', { filter: 'zzz' }], ['files', { limit: 2 }],
     ['read_file', { path: 'summary.md' }], ['read_file', { path: 'summary.md', limit: 2 }], ['read_file', { path: 'unified_logs/2026-03-10.tsv', grep: 'jetsam', limit: 3 }],
     ['read_file', { path: 'memory.txt', bundle: 'sample' }],
@@ -102,8 +105,10 @@ async function corpus() {
     ['search', { query: 'pivot', offset: 99999 }], ['search', { newest: true, offset: 5 }], ['search', { aroundId: 5, aroundTime: '2026-03-10 10:00' }],
     ['search', { aroundId: 5, from: '2026-03-10 10:00' }], ['search', { aroundId: 999999 }], ['search', { minSeverity: 'severe' }], ['search', { window: 'soon', aroundId: 5 }],
     ['count', { by: 'proc' }], ['histogram', { bins: 0 }], ['files', { offset: 999 }],
+    ['reports', { path: 'nothere.ips' }], ['reports', { path: 'summary.md' }], ['reports', { path: 'DiagnosticReports' }], ['reports', { path: 7 }],
     ['read_file', {}], ['read_file', { path: 'ips' }], ['read_file', { path: 'nothere.txt' }], ['read_file', { path: 'summary.md', fromLine: 999 }],
     ['summary', { bundle: 'nope' }], ['summary', { bundle: '../etc' }], ['memory', { utc: 'yes' }],
+    ['search', { severity: 'error', limit: 2 }], ['read_file', { filename: 'summary.md' }], ['memory', { at: '2026-03-10 10:35:00' }], ['memory', { time: 'soon' }], ['memory', { from: '2026-03-10 11:00', to: '2026-03-10 10:00' }],
   ];
   const run = ([op, params]) => p.raw.get(PREFIX + op)(params).then((envelope) => ({ tool: PREFIX + op, params, envelope, details: envelope.details }));
   const [ok, refused] = [await pooled(good, run), await pooled(bad, run)];
@@ -156,17 +161,17 @@ async function registerInstalled(f) {
 }
 
 describe('seams: the ten tools are named alike everywhere', () => {
-  it('the installer, the manifest, the plugin, what it registers and the skill table name the same ten, in one order', async () => {
+  it('the installer, the manifest, the plugin and what it registers name the same ten, in one order, and the skill names each', async () => {
     const p = await plugin();
     const manifest = JSON.parse(await fs.readFile(path.join(PLUGIN_DIR, 'openclaw.plugin.json'), 'utf8'));
-    const table = [...(await fs.readFile(SKILL_PATH, 'utf8')).matchAll(/^\| `(excel_diag_\w+)` \|/gm)].map((m) => m[1]);
+    const inSkill = [...new Set((await fs.readFile(SKILL_PATH, 'utf8')).match(/excel_diag_[a-z_]+/g))];
     const names = p.module.TOOLS.map((t) => t.name);
     assert.equal(names.length, 10);
     assert.equal(new Set(names).size, 10, 'no name twice');
     assert.deepEqual([...TOOL_NAMES], names, 'TOOL_NAMES in install.mjs, which the configuration is given to allow');
     assert.deepEqual(manifest.contracts.tools, names, 'contracts.tools in the manifest');
     assert.deepEqual([...p.definitions.keys()], names, 'what the plugin registers');
-    assert.deepEqual(table, names, 'the rows of the skill table');
+    assert.deepEqual(inSkill.sort(), names.slice().sort(), 'the tools the skill names');
     assert.equal(manifest.id, PLUGIN_ID);
     assert.equal(p.entry.id, PLUGIN_ID);
   });
@@ -233,7 +238,7 @@ describe('seams: what the installer installs is what runs', () => {
     assert.equal(found.details.ok, true, JSON.stringify(found.details).slice(0, 300));
     assert.equal(found.details.bundle, SAMPLE_ID);
     assert.equal(found.details.entries, 32861);
-    assert.deepEqual(found.details.availableBundles, [SAMPLE_ID]);
+    assert.deepEqual(found.details.availableBundles, [{ id: SAMPLE_ID }]);
     assert.deepEqual(logs, [], 'nothing about the configuration or the program needed saying');
     for (const b of blocks(found)) assert.ok(!b.includes(f.state), 'no folder of the host in what the model reads');
   });
@@ -275,10 +280,21 @@ describe('seams: the arguments a schema declares and the arguments the program r
       // utc is the one name read for every operation (it is the clock of the whole request). The two tools that
       // print no times do not declare it, the plugin never passes it to them, and it changes nothing there: below.
       const others = every.filter((name) => !Object.hasOwn(properties(t), name) && name !== 'utc');
-      assert.ok(others.length >= 9);
-      const [plain, stuffed] = await Promise.all([request({ format: 1, op, bundlesDir, params }), request({ format: 1, op, bundlesDir, params: { ...params, ...Object.fromEntries(others.map((name) => [name, ['not', 'read']])) } })]);
+      assert.ok(others.length >= 8);
+      // A name that stands for an argument of this tool (aroundId for show's id) is refused, naming it and the argument
+      // the tool has; each is taken out in turn. Every other name changes nothing.
+      const plain = await request({ format: 1, op, bundlesDir, params });
       assert.equal(plain.json.ok, true, `${op}: ${plain.stdout.slice(0, 200)}`);
-      assert.deepEqual(stuffed.json, plain.json, `${op} read one of: ${others.join(', ')}`);
+      let left = others.slice(), stuffed;
+      for (;;) {
+        stuffed = await request({ format: 1, op, bundlesDir, params: { ...params, ...Object.fromEntries(left.map((name) => [name, ['not', 'read']])) } });
+        const m = stuffed.json.ok === false && / is not a field of /.test(stuffed.json.error) ? /^(\w+) is not a field of excel_diag_(\w+)$/.exec(stuffed.json.error) : null;
+        if (!m) break;
+        assert.ok(left.includes(m[1]) && m[2] === op && Object.hasOwn(properties(t), stuffed.json.field) && stuffed.json.hint.endsWith('This call did not run.'), JSON.stringify(stuffed.json));
+        left = left.filter((name) => name !== m[1]);
+      }
+      assert.ok(left.length >= 5, `${op}: ${left.length} names are left that it does not take for another`);
+      assert.deepEqual(stuffed.json, plain.json, `${op} read one of: ${left.join(', ')}`);
     });
   });
 
@@ -316,6 +332,38 @@ describe('seams: the arguments a schema declares and the arguments the program r
       for (const name of r.details.hint.match(/\bexcel_diag_[a-z_]+/g) ?? []) for (const key of Object.keys(properties(p.definitions.get(name)))) allowed.add(key);
       for (const word of r.details.hint.match(/\b[a-z]+(?:[A-Z][a-z]+)+\b/g) ?? []) assert.ok(allowed.has(word), `${r.tool} ${JSON.stringify(r.params)}: the hint names ${word}`);
     }
+  });
+});
+
+describe('seams: the size of a result, in the program and in the plugin', () => {
+  it('the plugin\'s ceiling is worked out from the program\'s own limits, and is above the most the program gives', async () => {
+    const p = await plugin(), source = await fs.readFile(path.join(path.dirname(CLI_PATH), 'src', 'request.js'), 'utf8');
+    const constant = (name) => Number(new RegExp(`\\b${name} = (\\d+)[,;]`).exec(source)[1]);
+    const { PROGRAM_MOST, RESULT_MOST } = p.module, sum = Object.values(PROGRAM_MOST).reduce((a, n) => a + n, 0);
+    assert.deepEqual(PROGRAM_MOST, { text: constant('TEXT_MOST'), receipt: constant('RECEIPT_MOST'), notes: constant('NOTES_MOST'), next: constant('NEXT_MOST') });
+    // one message shown whole, with the words that say how much of it was left out, is less than the text of one result
+    assert.ok(constant('SHOW_CHARS') + 40 < constant('TEXT_MOST'));
+    assert.ok(RESULT_MOST > sum && RESULT_MOST <= sum + 6000, `RESULT_MOST is ${RESULT_MOST}, the program's parts ${sum}`);
+    // about 5,500 tokens of the model's context at the most, at four characters a token
+    assert.ok(sum <= 24000, `${sum}`);
+    for (const r of (await results()).all) {
+      const size = blocks(r.envelope).reduce((n, b) => n + b.length, 0);
+      assert.ok(size <= sum, `${r.tool} ${JSON.stringify(r.params)} came to ${size} characters`);
+    }
+  });
+
+  it('INSTALL.md gives the sizes as they are: the tools as registered, the skill, one result and the plugin\'s ceiling', async () => {
+    const p = await plugin(), install = (await fs.readFile(path.join(PLUGIN_DIR, '..', 'INSTALL.md'), 'utf8')).replace(/\s+/g, ' ');
+    const n = (k) => k.toLocaleString('en-US'), about = (said, real) => Math.abs(said - real) <= real * 0.03;
+    const registered = JSON.stringify([...p.definitions.values()].map(({ name, description, parameters, catalogMode }) => ({ name, description, parameters, catalogMode }))).length;
+    const toolsSaid = Number(/The ten tools, as the plugin registers them \(names, descriptions, schemas\) \| about ([\d,]+) characters of JSON/.exec(install)[1].replace(/,/g, ''));
+    const skillSaid = Number(/`SKILL\.md` \| about ([\d,]+) characters/.exec(install)[1].replace(/,/g, ''));
+    assert.ok(about(toolsSaid, registered), `INSTALL.md says ${toolsSaid}; the tools come to ${registered}`);
+    assert.ok(about(skillSaid, (await fs.readFile(SKILL_PATH, 'utf8')).length), `INSTALL.md says ${skillSaid} for SKILL.md`);
+    const { PROGRAM_MOST, RESULT_MOST } = p.module, sum = Object.values(PROGRAM_MOST).reduce((a, k) => a + k, 0);
+    assert.ok(install.includes(`at most about ${n(Math.round(sum / 1000) * 1000)} characters: up to ${n(PROGRAM_MOST.text)} of text, ${n(PROGRAM_MOST.receipt)} of JSON facts, ${n(PROGRAM_MOST.notes)} of facts about the call and ${n(PROGRAM_MOST.next)} of \`Next:\``), 'one result, by its parts');
+    assert.ok(install.includes(`no result over ${n(RESULT_MOST)} characters`), 'the plugin\'s ceiling');
+    assert.ok(install.includes('None of this has been checked on a live OpenClaw Gateway'));
   });
 });
 
@@ -388,7 +436,11 @@ describe('seams: the calls a result offers', () => {
 describe('seams: the fields the skill names and the fields results carry', () => {
   it('every field the skill names that is not an argument is carried by a real result', async () => {
     const p = await plugin(), all = await results(), text = await fs.readFile(SKILL_PATH, 'utf8');
-    const args = new Set(p.module.TOOLS.flatMap((t) => Object.keys(properties(t)))), carried = new Set(all.all.flatMap((r) => shape(r.details)));
+    // and the summary of a made-up bundle whose collection was not whole, for what the sample's collection does not record
+    const dir = await emptyDir('incomplete');
+    await writeIncomplete(path.join(dir, INCOMPLETE));
+    const made = await (await loadPlugin({ bundlesDir: dir })).tools.get('excel_diag_summary')({});
+    const args = new Set(p.module.TOOLS.flatMap((t) => Object.keys(properties(t)))), carried = new Set([...all.all.flatMap((r) => shape(r.details)), ...shape(made)]);
     const named = [...new Set([...text.slice(text.indexOf('\n---\n', 4)).matchAll(/`([a-z][A-Za-z]*)(?::[^`]*)?`/g)].map((m) => m[1]))].filter((name) => !args.has(name) && !['args', 'true', 'false'].includes(name));
     assert.ok(named.length >= 15, `fields named: ${named.join(', ')}`);
     for (const name of named) assert.ok(carried.has(name), `SKILL.md names \`${name}\`; no tool takes it and no result here carries it`);

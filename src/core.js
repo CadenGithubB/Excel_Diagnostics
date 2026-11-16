@@ -21,6 +21,9 @@ const Core = (() => {
     error: 4, err: 4, unexpected: 4, hang: 4, spin: 4, jetsam: 4, 'force quit': 4,
     fault: 5, critical: 5, fatal: 5, assert: 5, crash: 5, panic: 5,
   };
+  // The severity of a level name this tool knows by that name (SEV_OF), or -1: for the command-line tool, which says
+  // what a level name sent in place of a severity is counted as
+  const levelSev = (name) => { const k = String(name).toLowerCase(); return Object.hasOwn(SEV_OF, k) ? SEV_OF[k] : -1; };
   function sevOf(name) {
     const k = name.toLowerCase();
     if (k in SEV_OF) return SEV_OF[k];
@@ -41,7 +44,6 @@ const Core = (() => {
     for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); b[i] = c < 256 ? c : (CP1252.get(s[i]) || 63); }
     return UTF8.decode(b);
   }
-  const toLatin = (s) => (/[^\x00-\x7f]/.test(s) ? LATIN1.decode(new TextEncoder().encode(s)) : s);
   const escapeRx = (s) => s.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
   const basename = (p) => p.slice(p.lastIndexOf('/') + 1);
   function concat(list, total) { const out = new Uint8Array(total); let o = 0; for (const a of list) { out.set(a, o); o += a.length; } return out; }
@@ -92,6 +94,30 @@ const Core = (() => {
   function offStr(z) {                                  // "-0500", "+05:30", "-05" -> minutes east of UTC
     const m = /^([-+])(\d\d):?(\d\d)?$/.exec(z);
     return m ? (m[1] === '-' ? -1 : 1) * (m[2] * 60 + (+m[3] || 0)) : NaN;
+  }
+  // A time as somebody wrote it, in parts: y, mo and d (absent for a time of day alone), h, mi and s (each absent
+  // when not written), and z, the offset, Z or UTC (absent when not written), each as the digits written. Each part
+  // has to be one that can be: a month from 01 to 12, a day that month has, an hour from 00 to 23, a minute and a
+  // second from 00 to 59, and an offset from -12:00 to +14:00 with its minutes from 00 to 59. Left to Date, 2026-13-45
+  // would be read as 2027-02-14 and 09:00:99 as 09:01:39. timeBad says each part that is not, as a clause, and whether
+  // the offset is one of them. The command-line tool (parseTime in cli.js) and the page's From and To boxes both
+  // check a time here, and both read only the moments from TIME_FIRST to TIME_LAST: any moment between them is
+  // written with a year of four digits on any clock, so a time printed from it reads back.
+  const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const daysIn = (y, mo) => { const d = new Date(0); d.setUTCFullYear(y, mo, 0); return d.getUTCDate(); };      // mo from 1
+  const offsetOk = (z) => /^(z|utc)$/i.test(z) || (+z.replace(/^[+-](\d\d):?(\d\d)$/, '$2') <= 59 && offStr(z) >= -720 && offStr(z) <= 840);
+  const TIME_FIRST = Date.UTC(1000, 0, 2), TIME_LAST = Date.UTC(9999, 11, 30, 23, 59, 59, 999);
+  function timeBad(p) {
+    const bad = [], dated = p.y !== undefined, inMonth = Math.min(12, Math.max(1, +p.mo || 1));
+    if (dated && (+p.mo < 1 || +p.mo > 12)) bad.push(`the month is ${p.mo}, and months run from 01 to 12`);
+    if (dated && +p.d < 1) bad.push(`the day is ${p.d}, and days run from 01`);
+    else if (dated && +p.d > daysIn(+p.y, inMonth)) bad.push(+p.mo >= 1 && +p.mo <= 12 ? `the day is ${p.d}, and ${MONTH_NAMES[+p.mo - 1]} ${p.y} has days 01 to ${daysIn(+p.y, +p.mo)}` : `the day is ${p.d}, and no month has more than 31 days`);
+    if (p.h !== undefined && +p.h > 23) bad.push(`the hour is ${p.h}, and hours run from 00 to 23`);
+    if (p.mi !== undefined && +p.mi > 59) bad.push(`the minute is ${p.mi}, and minutes run from 00 to 59`);
+    if (p.s !== undefined && +p.s > 59) bad.push(`the second is ${p.s}, and seconds run from 00 to 59`);
+    const zoneBad = p.z !== undefined && !offsetOk(p.z);
+    if (zoneBad) bad.push(`the offset is ${p.z}, and offsets run from -12:00 to +14:00, with minutes from 00 to 59`);
+    return { bad, zoneBad };
   }
   function stamp(t, digits = 3) {                       // UTC ms -> "YYYY-MM-DD HH:MM:SS.fff"
     // Past milliseconds, count in the smallest unit shown and round: a time read from ".123456" is held as a float
@@ -468,6 +494,8 @@ const Core = (() => {
   };
   // Where a collector puts the reports that only macOS writes: its copies of the system's own report folders
   const SYSTEM_REPORTS = /^reports\/Library_Logs_DiagnosticReports(?:_Retired)?\/[^/]+$/;
+  // How much of a CrashReporter file written out as text is read for its ForceQuitDate lines (addReports)
+  const FORCE_QUIT_READ = 65536;
   function sniffText(ds, path, head) {                  // a log with times at the start of its lines, of no particular kind, or nothing
     const spec = RX_KINDS[RX_KINDS.length - 1], lines = head.split(/\r?\n/).filter(Boolean).slice(0, 25);
     const hits = lines.filter((l) => spec.rx.test(l)).length;
@@ -715,14 +743,18 @@ const Core = (() => {
       if (en.size > 8192) text = UTF8.decode(await en.head(json ? cap : Math.min(cap, 1 << 20)));    // a JSON body has to be read whole to be read at all
       const out = { path: en.path, t: NaN, proc: '', what: [], facts: [], stack: null, images: [], size: en.size, read: Math.min(en.size, json ? cap : Math.min(cap, 1 << 20)), headerOnly: false,
         kind: capture ? cap1(capture[1]) : { ips: 'Report', crash: 'Crash', diag: 'Diag', hang: 'Hang', spin: 'Spin', panic: 'Panic', shutdownstall: 'Hang' }[ext] || 'Report' };
-      const fact = (label, value) => { value = value == null || value === false ? '' : String(value).replace(/\s+/g, ' ').trim(); if (value) out.facts.push([label, value]); return value; };
+      // A value that cannot be made into text (a list nested past what String() can follow) is left out with its fact.
+      // Every value read from the report's JSON has had what is nested past JSON_DEPTH in it taken out (shallow), so
+      // this is a second guard only.
+      const asText = (v) => { try { return String(v); } catch (err) { return ''; } };
+      const fact = (label, value) => { value = value == null || value === false ? '' : asText(value).replace(/\s+/g, ' ').trim(); if (value) out.facts.push([label, value]); return value; };
       const join = (...parts) => parts.filter(Boolean).join(' ');
       const stampOf = (str) => { const m = /(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) ?([-+]\d{4})/.exec(str || ''); return m ? isoAt(m[1], 0) - offStr(m[2]) * 60000 : NaN; };
       let body = text, parsed = null;
       if (json) {                                         // a one-line JSON header, then a JSON body (crash, jetsam) or a text one
         const nl = text.indexOf('\n');
         let h = null;
-        try { h = JSON.parse(nl > 0 ? text.slice(0, nl) : text); } catch (err) { /* not a header after all */ }
+        try { h = shallow(JSON.parse(nl > 0 ? text.slice(0, nl) : text)); } catch (err) { /* not a header after all */ }
         if (h && typeof h === 'object') {
           body = nl > 0 ? text.slice(nl + 1) : '';
           out.t = stampOf(h.timestamp); out.proc = h.app_name || h.name || '';
@@ -735,7 +767,7 @@ const Core = (() => {
           fact('Report time', h.timestamp); fact('Report type', h.bug_type && `bug type ${h.bug_type}`);
           fact('App', join(h.app_name || h.name, h.app_version && `version ${h.app_version}`, h.build_version && `(${h.build_version})`));
           fact('macOS', h.os_version);
-          if (out.read >= en.size) { try { parsed = JSON.parse(body); } catch (err) { /* a text body, handled below */ } }
+          if (out.read >= en.size) { try { parsed = shallow(JSON.parse(body)); } catch (err) { /* a text body, handled below */ } }
           else if (/^\s*\{/.test(body)) { out.headerOnly = true; body = ''; }      // a JSON body too large to read whole: only its header line is laid out
         }
       }
@@ -794,6 +826,22 @@ const Core = (() => {
           const few = (/^Thread/.test(start[0]) ? block.slice(0, 6) : block.slice(-6)).map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
           if (few.length) out.what.push(`${out.stack.title}: ${few.join(' | ')}`.slice(0, 900));
         }
+        // How many threads and images a text report lists, as a JSON one says it, counted line by line in what was
+        // read: a thread is a "Thread N:" or "Thread N Crashed:" line of a crash report (each N once) or an indented
+        // "Thread 0x..." line of a spindump, and an image is a line under a "Binary Images:" line, to the next empty one.
+        const numbered = new Set();
+        let spun = 0, images = 0, inImages = false;
+        for (const l of body.split(/\r?\n/)) {
+          if (inImages) { if (l.trim()) { images++; continue; } inImages = false; }
+          const m = /^Thread (\d+)(?: Crashed)?:/.exec(l);
+          if (m) numbered.add(m[1]);
+          else if (/^\s+Thread 0x[0-9a-fA-F]+\b/.test(l)) spun++;
+          else if (l.trim() === 'Binary Images:') inImages = true;
+        }
+        // Counted in what was read: when that is not the whole report, the label says so
+        const part = out.read < en.size;
+        if (numbered.size + spun) fact(part ? 'Threads in the part read' : 'Threads in the report', numbered.size + spun);
+        if (images) fact(part ? 'Images listed in the part read' : 'Images listed', images);
       }
       if (/^JetsamEvent/i.test(file)) out.kind = 'Jetsam';
       if (/^(ExcessiveResource|.*\.(cpu|wakeups|diskwrites)_resource)/i.test(file)) out.kind = 'Diag';
@@ -835,9 +883,15 @@ const Core = (() => {
           }
           add(r.t, r.kind, r.proc, en.path, r.what.join('; '));
         } else if (/CrashReporter\/[^/]+\.txt$/i.test(en.path)) {
-          const text = UTF8.decode(await en.head(4096));
-          for (const m of text.matchAll(/"ForceQuitDate" => (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([-+]\d{4})/g)) {
-            add(isoAt(m[1], 0) - offStr(m[2]) * 60000, 'Force quit', file.replace(/_(?:[0-9A-F-]{36}|redacted-hardware-uuid)\.txt$/i, ''), en.path, 'last time the user force-quit this app');
+          // One entry for each ForceQuitDate the file holds, each said as what it is among them: a file can hold several.
+          // At most FORCE_QUIT_READ bytes of it are read, and what is said of a file longer than that is said of the part
+          // read: the file can hold more times past it, and a later one.
+          const text = UTF8.decode(await en.head(FORCE_QUIT_READ)), where = en.size > FORCE_QUIT_READ ? `in the first ${FORCE_QUIT_READ.toLocaleString('en-US')} bytes of this file` : 'this file records';
+          const at = [...text.matchAll(/"ForceQuitDate" => (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ([-+]\d{4})/g)].map((m) => isoAt(m[1], 0) - offStr(m[2]) * 60000);
+          const latest = at.reduce((a, t) => (t > a ? t : a), -Infinity);
+          for (const t of at) {
+            add(t, 'Force quit', file.replace(/_(?:[0-9A-F-]{36}|redacted-hardware-uuid)\.txt$/i, ''), en.path, at.length === 1 ? `the one force-quit time ${where}`
+              : `${t === latest ? 'the latest' : 'one'} of the ${at.length} force-quit times ${where}`);
           }
         }
       }
@@ -987,6 +1041,8 @@ const Core = (() => {
       const up = /\bup\s+(.+?),\s+\d+\s+users?,\s+load averages?:\s*(.+)$/m.exec(sys);
       if (up) { add('Uptime when collected', up[1], SYS); add('Load averages when collected', `${up[2].trim()} (over 1, 5 and 15 minutes)`, SYS); }
       add('Excel', ...first([both(bi.get('excel_version'), bi.get('excel_build')), B], [pick(ver, /^Microsoft Excel:\s*(.+)$/m), VER]));
+      // written as the collector starts, before anything else it does: whether a process of the console user's ran Excel then
+      add('Excel running when the collector started', bi.get('excel_running'), B);
       const others = [...ver.matchAll(/^(Microsoft (?:Word|PowerPoint|Outlook|Teams)|OneDrive):\s*(.+)$/gm)].map((m) => `${m[1].replace(/^Microsoft /, '')} ${m[2].trim()}`);
       add('Other Office apps', others.join(', '), VER);
       return out;
@@ -998,12 +1054,19 @@ const Core = (() => {
     //   asleep   each sleep in the sleep and wake history, for as long as its own line says it lasted
     //   cover    the spans the macOS log and Excel's own logs in the bundle cover, so that a stretch with no entries
     //            can be told apart from a stretch the bundle has no log for
-    // Each is a recorded time or a span between two recorded times. Nothing is inferred about why.
+    // Each is a recorded time or a span between two recorded times. Nothing is inferred about why. The first 500 Excel
+    // process IDs are followed, and excelPidsCut is true when the logs have entries under more.
     async marks() {
       if (this.markCache) return this.markCache;
       const G = this.g, D = this.dict, S = this.sources, kindOf = S.map((s) => s.parser.kind);
-      const out = { marks: [], asleep: [], cover: { unified: [], office: [] }, collected: this.collected, searched: false };
-      const read = async (path) => { const en = this.entries.find((e) => e.path === path); return en && en.size ? UTF8.decode(await en.head(65536)) : ''; };
+      const out = { marks: [], asleep: [], cover: { unified: [], office: [] }, collected: this.collected, searched: false, excelPidsCut: false };
+      // Each read to its first MB, as the command-line tool reads them, without a line cut short where the read ends
+      const read = async (path) => {
+        const en = this.entries.find((e) => e.path === path);
+        if (!en || !en.size) return '';
+        const text = UTF8.decode(await en.head(1 << 20));
+        return en.size > 1 << 20 ? text.slice(0, text.lastIndexOf('\n') + 1) : text;
+      };
       for (const r of this.reportList) out.marks.push({ t: r.t, kind: 'report', text: r.kind === 'Force quit' ? `Force quit recorded: ${r.proc}` : `${r.kind === 'Report' ? 'Report' : `${r.kind} report`}: ${r.proc}` });
 
       const xl = D.proc.map.get('Microsoft Excel'), runs = new Map(), power = [], installs = [];
@@ -1013,10 +1076,11 @@ const Core = (() => {
         else if (k === 'install') installs.push(G.T[i]);
         else if (G.P[i] === xl && G.PID[i] > 0 && (k === 'unified' || k === 'office')) {
           const run = runs.get(G.PID[i]);
-          if (run) run.t1 = G.T[i]; else if (runs.size < 500) runs.set(G.PID[i], { t: G.T[i], t1: G.T[i] });
+          if (run) run.t1 = G.T[i]; else if (runs.size < 500) runs.set(G.PID[i], { t: G.T[i], t1: G.T[i] }); else out.excelPidsCut = true;
         }
       }
-      for (const [pid, run] of runs) out.marks.push({ t: run.t, t1: run.t1, kind: 'excel', text: `First entry from Microsoft Excel with process ID ${pid}` });
+      // pid and t1 (its last entry) are for the command-line tool's summary; the page draws t
+      for (const [pid, run] of runs) out.marks.push({ t: run.t, t1: run.t1, kind: 'excel', pid, text: `First entry from Microsoft Excel with process ID ${pid}` });
       for (const [t, what] of power) if (what === 'Start' || what === 'Shutdown' || what === 'Restart') out.marks.push({ t, kind: 'power', text: `${what}, in the sleep and wake history` });
       for (const s of S) {                                // a Sleep line ends with how long that sleep lasted: "... 7699 secs"
         if (kindOf[s.id] !== 'power') continue;
@@ -1047,8 +1111,10 @@ const Core = (() => {
       // The macOS log is collected a day at a time, and each file covers at least from its first entry to its last.
       // Where the collector recorded that a day's search ran to the end ("ok (N entries)"), that day is covered to
       // its end, or to the moment of collection, however few entries it holds; and from its start as well when the
-      // bundle has macOS log entries from before that day, which shows macOS still had logs that far back.
-      const status = new Map((await read('unified_logs/collection_status.txt')).split(/\r?\n/).map((l) => /^(\d{4}-\d\d-\d\d) \| (.*)$/.exec(l)).filter(Boolean).map((m) => [m[1], m[2]]));
+      // bundle has macOS log entries from before that day, which shows macOS still had logs that far back. A span covers
+      // its two ends, and the next day starts at midnight: so a day is covered to the millisecond before it.
+      // (a line is read whole whatever it holds, a line separator among it)
+      const status = new Map((await read('unified_logs/collection_status.txt')).split(/\r?\n/).map((l) => /^(\d{4}-\d\d-\d\d) \| (.*)$/s.exec(l)).filter(Boolean).map((m) => [m[1], m[2]]));
       const manifest = await read('manifest.tsv');
       const unified = S.filter((s) => s.n && kindOf[s.id] === 'unified'), earliest = Math.min(...unified.map((s) => s.t0));
       const end = out.collected === out.collected ? out.collected : this.t1;
@@ -1056,7 +1122,7 @@ const Core = (() => {
         const day = (/(?:^|\/)unified_logs\/(\d{4}-\d\d-\d\d)\.[a-z]+$/.exec(s.path) || [])[1];
         if (day && /^ok \(/.test(status.get(day) || '')) {
           const start = isoAt(`${day} 00:00:00`, 0), from = this.localToUtc(start);
-          out.cover.unified.push([earliest < from ? from : s.t0, Math.max(s.t1, Math.min(this.localToUtc(start + 86400000), end))]);
+          out.cover.unified.push([earliest < from ? from : s.t0, Math.max(s.t1, Math.min(this.localToUtc(start + 86400000) - 1, end))]);
         } else if (/(?:^|\/)unified_last30m\.[a-z]+$/.test(s.path) && /^unified_last30m\tcomplete\b/m.test(manifest)) {
           out.cover.unified.push([Math.min(s.t0, end - 1800000), Math.max(s.t1, end)]);      // a hang capture searches the half hour before it
         } else out.cover.unified.push([s.t0, s.t1]);
@@ -1065,7 +1131,7 @@ const Core = (() => {
       // the bundle shows macOS still had logs that far back.
       for (const [day, st] of status) {
         const start = isoAt(`${day} 00:00:00`, 0), from = this.localToUtc(start);
-        if (/^ok, nothing found/.test(st) && earliest < from) out.cover.unified.push([from, Math.min(this.localToUtc(start + 86400000), Math.max(end, from))]);
+        if (/^ok, nothing found/.test(st) && earliest < from) out.cover.unified.push([from, Math.min(this.localToUtc(start + 86400000) - 1, Math.max(end, from))]);
       }
       // The collector looked for macOS logs, whatever it got: with none at all, the whole chart is a stretch without them
       out.searched = status.size > 0 || /unified_logs\/collection_status\.txt|access check \|/.test([...status.values()].join('\n')) || /^unified_(?:logs|last30m)\t/m.test(manifest) || this.entries.some((e) => /(?:^|\/)unified_logs\/collection_status\.txt$/.test(e.path));
@@ -1127,7 +1193,7 @@ const Core = (() => {
       };
       const FIELD = { level: 'level', lvl: 'level', sev: 'level', severity: 'level', process: 'process', proc: 'process', pid: 'pid',
         subsystem: 'subsystem', sub: 'subsystem', area: 'subsystem', category: 'category', cat: 'category', tag: 'tag', source: 'source', src: 'source', file: 'source' };
-      const tok = /(-?)(?:(level|lvl|sev|severity|process|proc|pid|subsystem|sub|area|category|cat|tag|source|src|file):)?(?:"((?:[^"\\]|\\.)*)"|\/((?:[^\/\\]|\\.)+)\/(i?)(?=\s|$)|(\S+))/gi;
+      const tok = new RegExp(TERM.source, TERM.flags);
       let m;
       while ((m = tok.exec(text)) !== null) {
         const neg = m[1] === '-', field = m[2] && FIELD[m[2].toLowerCase()];
@@ -1138,13 +1204,25 @@ const Core = (() => {
         if (m[6] !== undefined) plain(m[0]);
         const src = m[4] !== undefined ? m[4] : escapeRx(lit);
         const flags = 'm' + (cs && !m[5] ? '' : 'i');
-        try {
-          out.text.push({ neg, re: new RegExp(toLatin(src), 'g' + flags), one: new RegExp(toLatin(src), flags) });
-          if (!neg) out.hl.push({ src, flags: flags.replace('m', '') });
-        } catch (err) {
+        let re;
+        try { re = new RegExp(src, 'g' + flags); } catch (err) {
           out.err = `Invalid regular expression /${src}/ - ${err.message}`;
           out.notes.push({ text: `/${src}/ is not a valid regular expression (${String(err.message).replace(/^Invalid regular expression: \/.*\/[a-z]*: /, '')}), so it was left out of the search. To search for those characters as plain text, put them in quotation marks.` });
+          continue;
         }
+        // A word or a phrase is one fixed string, which JavaScript's own reader finds in time that grows with the
+        // text only. A /regex/ is read by this tool's reader (rxCompile), one line at a time. Each is matched with
+        // the text of an entry as it is shown, read as UTF-8 (scanText): a word that has a character past ASCII
+        // (wide) can only match an entry that has one too, and is looked for in each such entry on its own.
+        if (m[4] === undefined) {
+          out.text.push(/[^\x00-\x7f]/.test(src) ? { neg, re, wide: new RegExp(src, flags) } : { neg, re, one: new RegExp(src, flags) });
+          if (!neg) out.hl.push({ src, flags: flags.replace('m', '') });
+          continue;
+        }
+        const rx = rxCompile(src, flags);
+        if (rx.why) { out.notes.push({ text: RX_LEFT_OUT[rx.why](src, rx) }); continue; }
+        out.text.push({ neg, re, rx });
+        if (!neg) out.hl.push({ src, flags: flags.replace('m', ''), rx: true });
       }
       return out;
     }
@@ -1157,15 +1235,47 @@ const Core = (() => {
         const start = off[r];
         const rEnd = Math.min(hi, Math.max(r + 1, upperBound(off, start + CHUNK, r, hi)));
         const end = off[rEnd - 1] + len[rEnd - 1];
-        const s = LATIN1.decode(await blob.slice(start, end).arrayBuffer());
+        const buf = new Uint8Array(await blob.slice(start, end).arrayBuffer()), s = LATIN1.decode(buf);
         const acc = new Uint8Array(rEnd - r).fill(1), hit = new Uint8Array(rEnd - r);
+        // Each row is matched as its entry is shown (readRows): read as UTF-8, without the line ends and NULs at its
+        // end. A row of ASCII only reads the same in s, one character a byte; a row with a byte past ASCII (wide) is
+        // read again as UTF-8, once, when a term needs it.
+        const tail = (j) => { const a = off[j] - start; let b = a + len[j]; while (b > a) { const c = s.charCodeAt(b - 1); if (c !== 13 && c !== 10 && c !== 0) break; b--; } return b; };
+        let wideAt = null;
+        const wideRows = () => {
+          if (wideAt) return wideAt;
+          const wide = wideAt = new Uint8Array(rEnd - r);
+          const past = /[^\x00-\x7f]/g;
+          for (let row = r, m; (m = past.exec(s)) !== null;) {
+            const pos = start + m.index, j = upperBound(off, pos, row, rEnd) - 1;
+            if (pos < off[j] + len[j]) wide[j - r] = 1;
+            if (j + 1 >= rEnd) break;
+            row = j + 1; past.lastIndex = Math.max(past.lastIndex, off[row] - start);
+          }
+          return wide;
+        };
+        const shown = [];
+        const shownText = (j) => {                      // the row as its entry is shown, for wide rows only
+          if (shown[j - r] === undefined) { const t = UTF8.decode(buf.subarray(off[j] - start, off[j] - start + len[j])); let b = t.length; while (b > 0) { const c = t.charCodeAt(b - 1); if (c !== 13 && c !== 10 && c !== 0) break; b--; } shown[j - r] = t.slice(0, b); }
+          return shown[j - r];
+        };
         for (const term of terms) {
           hit.fill(0);
+          if (term.rx || term.wide) {                   // each row on its own, so nothing is read across rows
+            const w = wideRows();
+            for (let j = r; j < rEnd; j++) {
+              if (w[j - r]) { const t = shownText(j); if (term.rx ? term.rx.test(t, 0, t.length) : term.wide.test(t)) hit[j - r] = 1; }
+              else if (term.rx && term.rx.test(s, off[j] - start, tail(j))) hit[j - r] = 1;
+            }
+            if (term.neg) for (let k = 0; k < acc.length; k++) acc[k] &= hit[k] ^ 1;
+            else for (let k = 0; k < acc.length; k++) acc[k] &= hit[k];
+            continue;
+          }
           const re = term.re;
           re.lastIndex = 0;
           let row = r, m;
           while ((m = re.exec(s)) !== null) {           // jump from match to match; each hit marks its row and skips to the next row
-            const pos = start + m.index, j = upperBound(off, pos, row, rEnd) - 1, rowEnd = off[j] + len[j];
+            const pos = start + m.index, j = upperBound(off, pos, row, rEnd) - 1, rowEnd = tail(j) + start;
             if (pos < rowEnd) {
               if (pos + m[0].length <= rowEnd) hit[j - r] = 1;
               else if (term.one.test(s.substring(off[j] - start, rowEnd - start))) hit[j - r] = 1;
@@ -1390,6 +1500,652 @@ const Core = (() => {
     }
   }
 
+  // ---------- a JSON value read from a bundle ----------
+  // The value with every list or object nested more than JSON_DEPTH deep in it made '' in its place. String(), join()
+  // and a template follow a nested list as deep as it goes, and throw on one nested past what they can follow, which
+  // would leave a whole report unread for one of its values. Walked with a list of its own, so no depth is too deep.
+  const JSON_DEPTH = 32;
+  function shallow(v) {
+    if (!v || typeof v !== 'object') return v;
+    const todo = [[v, 0]];
+    while (todo.length) {
+      const [o, d] = todo.pop();
+      for (const k of Object.keys(o)) { const x = o[k]; if (x && typeof x === 'object') { if (d + 1 >= JSON_DEPTH) o[k] = ''; else todo.push([x, d + 1]); } }
+    }
+    return v;
+  }
+
+  // ---------- the terms of a search ----------
+  // One term each: a word, a phrase in quotation marks, a /regex/, and a field such as process:excel, each with a minus
+  // before it or not. compile() reads a search's text a term at a time by this, and queryTerms() counts the terms, so a
+  // caller that bounds how many a search has counts them as the search reads them (a phrase of many words is one).
+  const TERM = /(-?)(?:(level|lvl|sev|severity|process|proc|pid|subsystem|sub|area|category|cat|tag|source|src|file):)?(?:"((?:[^"\\]|\\.)*)"|\/((?:[^\/\\]|\\.)+)\/(i?)(?=\s|$)|(\S+))/gi;
+  const queryTerms = (text) => { const tok = new RegExp(TERM.source, TERM.flags), s = String(text); let n = 0; while (tok.exec(s)) n++; return n; };
+
+  // ---------- a /regex/, read by this tool ----------
+  // A /regex/ term is not handed to JavaScript's own reader. That one tries one way of matching after another, and a
+  // pattern such as (a|aa)+z, (a+){2,30}z or \s+$ has, on some lines, more ways than any search has time for. This
+  // reader takes a pattern as JavaScript reads it (with the i and m flags as given, without u, s, y or v) and follows
+  // every way at once, so it reads each character of a line once, in steps no more than the pattern is long:
+  //  - rxCompile(src, flags) gives a reader, or { why } for a pattern it does not read: 'look' for one with a
+  //    look-ahead or look-behind ((?= (?! (?<= (?<!), 'back' for one with a back-reference (\1, \k<name>), both of
+  //    which need more than one pass, and 'big' for one that is more than RX_MOST steps long as rxSize counts them
+  //    (each counted repeat such as {2,30} written out as that many copies, with more for each | and for each copy
+  //    that may be left out), with counted: whether it has a counted repeat;
+  //  - reader.test(s, a, b): whether the pattern matches in s from a to b, as it would in that part on its own;
+  //  - reader.find(s, from, most): [start, end] of the first match at or after from, or null (also when more than
+  //    `most` steps would be taken, each step being one place in the pattern looked at, reader.steps saying how many
+  //    were): for marking matches on the page. It starts and ends where JavaScript's match would.
+  // It is read as a set of states that the pattern can be in (built as they are met, and kept up to a fixed number);
+  // what JavaScript itself reads is used only to check that the pattern is one (new RegExp, which matches nothing).
+  const RX_MOST = 2000;
+  const RX_LT = [[10, 10], [13, 13], [0x2028, 0x2029]], RX_WORD = [[48, 57], [65, 90], [95, 95], [97, 122]], RX_DIGIT = [[48, 57]];
+  const RX_SPACE = [[9, 13], [32, 32], [0xa0, 0xa0], [0x1680, 0x1680], [0x2000, 0x200a], [0x2028, 0x2029], [0x202f, 0x202f], [0x205f, 0x205f], [0x3000, 0x3000], [0xfeff, 0xfeff]];
+  function rxNorm(rs) {                                 // ranges [lo, hi] of UTF-16 code units, sorted, with touching ones joined
+    const out = [];
+    for (const [a, b] of rs.slice().sort((x, y) => x[0] - y[0])) { const l = out[out.length - 1]; if (l && a <= l[1] + 1) l[1] = Math.max(l[1], b); else out.push([a, b]); }
+    return out;
+  }
+  function rxNot(rs) { const out = []; let c = 0; for (const [a, b] of rs) { if (a > c) out.push([c, a - 1]); c = b + 1; } if (c <= 0xffff) out.push([c, 0xffff]); return out; }
+  // The i flag: two code units match when their canonical forms are the same, a form being the code unit in upper
+  // case, kept as it is when that takes more than one code unit or would take it from outside ASCII into it
+  let rxCanon = null, rxSame = null, rxSameAt = null;   // each code unit's form; the code units of each form, by form
+  function rxFold(rs) {                                 // every code unit that the i flag matches with one in rs (sorted)
+    if (!rxCanon) {
+      rxCanon = new Uint16Array(65536);
+      for (let c = 0; c < 65536; c++) { const u = String.fromCharCode(c).toUpperCase(); rxCanon[c] = u.length !== 1 || (c >= 128 && u.charCodeAt(0) < 128) ? c : u.charCodeAt(0); }
+      rxSameAt = new Int32Array(65537);
+      for (let c = 0; c < 65536; c++) rxSameAt[rxCanon[c] + 1]++;
+      for (let k = 1; k <= 65536; k++) rxSameAt[k] += rxSameAt[k - 1];
+      rxSame = new Uint16Array(65536);
+      const at = rxSameAt.slice(0, 65536);
+      for (let c = 0; c < 65536; c++) rxSame[at[rxCanon[c]]++] = c;
+    }
+    let size = 0;
+    for (const [a, b] of rs) size += b - a + 1;
+    if (size > 4096) {
+      const want = new Uint8Array(65536), out = [];
+      for (const [a, b] of rs) for (let c = a; c <= b; c++) want[rxCanon[c]] = 1;
+      for (let c = 0, lo = -1; c <= 65536; c++) { const on = c < 65536 && want[rxCanon[c]] === 1; if (on && lo < 0) lo = c; else if (!on && lo >= 0) { out.push([lo, c - 1]); lo = -1; } }
+      return out;
+    }
+    const out = [];
+    for (const [a, b] of rs) for (let c = a; c <= b; c++) { const v = rxCanon[c]; for (let k = rxSameAt[v]; k < rxSameAt[v + 1]; k++) out.push([rxSame[k], rxSame[k]]); }
+    return rxNorm(out);
+  }
+  // The pattern as a tree: { t: 'set', rs } (one code unit from these ranges), { t: 'as', k } (^, $, \b or \B, k
+  // saying which and whether m applies), { t: 'cat', items }, { t: 'alt', items } and { t: 'rep', min, max, greedy, item }.
+  // Read as JavaScript reads a pattern without the u flag, old forms included: \8 is 8, \07 is an octal escape, a
+  // { that starts no {n,m} is itself, and \c not before a letter is a backslash. A group's own flags, (?i:...), hold in it.
+  const RX_QB = /\{(\d+)(?:(,)(\d*))?\}/y, RX_FLAGS = /\?([ims]*)(?:-([ims]*))?:/y;
+  function rxParse(src, ic0, multi0) {
+    let groups = 0, named = false;                      // how many groups capture, and whether one is named: \2 and \k read by it
+    for (let k = 0, inCls = false; k < src.length; k++) {
+      const c = src[k];
+      if (c === '\\') k++;
+      else if (inCls) { if (c === ']') inCls = false; }
+      else if (c === '[') inCls = true;
+      else if (c === '(') { if (src[k + 1] !== '?') groups++; else if (src[k + 2] === '<' && src[k + 3] !== '=' && src[k + 3] !== '!') { groups++; named = true; } }
+    }
+    let i = 0, ic = ic0, multi = multi0, dotAll = false, counted = false;
+    const stop = (why) => { throw { rxWhy: why }; };
+    const one = (rs) => ({ t: 'set', rs: ic ? rxFold(rxNorm(rs)) : rxNorm(rs) });
+    const hexAt = (n) => { const h = src.substr(i, n); return h.length === n && /^[0-9a-fA-F]+$/.test(h) ? parseInt(h, 16) : -1; };
+    const octal = () => {                               // an old-style octal escape, from its first digit: \0 to \377
+      let v = src.charCodeAt(i++) - 48;
+      if (src[i] >= '0' && src[i] <= '7') { v = v * 8 + src.charCodeAt(i++) - 48; if (v < 32 && src[i] >= '0' && src[i] <= '7') v = v * 8 + src.charCodeAt(i++) - 48; }
+      return v;
+    };
+    function escape(inCls) {                            // after a backslash: { rs }, { c } or { as }
+      const e = src[i++];
+      switch (e) {
+        case 'd': return { rs: RX_DIGIT }; case 'D': return { rs: rxNot(RX_DIGIT) };
+        case 'w': return { rs: RX_WORD }; case 'W': return { rs: rxNot(RX_WORD) };
+        case 's': return { rs: RX_SPACE }; case 'S': return { rs: rxNot(RX_SPACE) };
+        case 'b': return inCls ? { c: 8 } : { as: 'wb' };
+        case 'B': return inCls ? { c: 66 } : { as: 'nwb' };
+        case 't': return { c: 9 }; case 'n': return { c: 10 }; case 'v': return { c: 11 }; case 'f': return { c: 12 }; case 'r': return { c: 13 };
+        case 'c': { const l = src[i]; if (l && (/[A-Za-z]/.test(l) || (inCls && /[0-9_]/.test(l)))) { i++; return { c: l.charCodeAt(0) % 32 }; } i--; return { c: 92 }; }
+        case 'x': { const v = hexAt(2); if (v < 0) return { c: 120 }; i += 2; return { c: v }; }
+        case 'u': { const v = hexAt(4); if (v < 0) return { c: 117 }; i += 4; return { c: v }; }
+        case 'k': if (named && !inCls) stop('back'); return { c: 107 };
+        case undefined: stop('syntax');
+      }
+      if (e >= '0' && e <= '9') {
+        i--;
+        if (!inCls && e !== '0') { let k = i; while (src[k] >= '0' && src[k] <= '9') k++; if (Number(src.slice(i, k)) <= groups) stop('back'); }
+        if (e >= '8') { i++; return { c: e.charCodeAt(0) }; }
+        return { c: octal() };
+      }
+      return { c: e.charCodeAt(0) };
+    }
+    function cls() {
+      i++;
+      const neg = src[i] === '^', rs = [];
+      if (neg) i++;
+      const item = () => (src[i] === '\\' ? (i++, escape(true)) : { c: src.charCodeAt(i++) });
+      const put = (x) => { if (x.rs) rs.push(...x.rs); else rs.push([x.c, x.c]); };
+      while (i < src.length && src[i] !== ']') {
+        const a = item();
+        if (src[i] === '-' && i + 1 < src.length && src[i + 1] !== ']') {
+          i++;
+          const b = item();
+          if (a.rs || b.rs) { put(a); rs.push([45, 45]); put(b); }      // a class at either end: no range, and - is itself
+          else { if (a.c > b.c) stop('syntax'); rs.push([a.c, b.c]); }
+        } else put(a);
+      }
+      if (src[i] !== ']') stop('syntax');
+      i++;
+      const r = ic ? rxFold(rxNorm(rs)) : rxNorm(rs);
+      return { t: 'set', rs: neg ? rxNot(r) : r };
+    }
+    function atom() {
+      const c = src[i];
+      if (c === '^') { i++; return { t: 'as', k: multi ? 'bolm' : 'bol' }; }
+      if (c === '$') { i++; return { t: 'as', k: multi ? 'eolm' : 'eol' }; }
+      if (c === '.') { i++; return { t: 'set', rs: dotAll ? [[0, 0xffff]] : rxNot(RX_LT) }; }
+      if (c === '[') return cls();
+      if (c === '\\') { i++; const e = escape(false); return e.as ? { t: 'as', k: e.as } : one(e.rs || [[e.c, e.c]]); }
+      if (c !== '(') { i++; return one([[c.charCodeAt(0), c.charCodeAt(0)]]); }
+      i++;
+      const keep = [ic, multi, dotAll];
+      if (src[i] === '?') {
+        const n = src[i + 1];
+        if (n === '=' || n === '!' || (n === '<' && (src[i + 2] === '=' || src[i + 2] === '!'))) stop('look');
+        if (n === '<') i = src.indexOf('>', i) + 1;
+        else if (n === ':') i += 2;
+        else {
+          RX_FLAGS.lastIndex = i;
+          const f = RX_FLAGS.exec(src);
+          if (!f) stop('syntax');
+          for (const x of f[1]) { if (x === 'i') ic = true; else if (x === 'm') multi = true; else dotAll = true; }
+          for (const x of f[2] || '') { if (x === 'i') ic = false; else if (x === 'm') multi = false; else dotAll = false; }
+          i = RX_FLAGS.lastIndex;
+        }
+      }
+      const inner = disj();
+      if (src[i] !== ')') stop('syntax');
+      i++;
+      [ic, multi, dotAll] = keep;
+      return inner;
+    }
+    const count = (d) => { const n = Number(d); return n >= 2147483647 ? Infinity : n; };
+    function quant(a) {
+      let min, max;
+      const c = src[i];
+      if (c === '*') { min = 0; max = Infinity; i++; }
+      else if (c === '+') { min = 1; max = Infinity; i++; }
+      else if (c === '?') { min = 0; max = 1; i++; }
+      else if (c === '{') {
+        RX_QB.lastIndex = i;
+        const m = RX_QB.exec(src);
+        if (!m) return a;
+        min = count(m[1]); max = m[2] === undefined ? min : m[3] === '' ? Infinity : count(m[3]);
+        i = RX_QB.lastIndex; counted = true;
+      } else return a;
+      let greedy = true;
+      if (src[i] === '?') { greedy = false; i++; }
+      if (a.t === 'as' || min > max) stop('syntax');
+      return { t: 'rep', min, max, greedy, item: a };
+    }
+    function alt() { const items = []; while (i < src.length && src[i] !== '|' && src[i] !== ')') items.push(quant(atom())); return { t: 'cat', items }; }
+    function disj() { const items = [alt()]; while (src[i] === '|') { i++; items.push(alt()); } return items.length === 1 ? items[0] : { t: 'alt', items }; }
+    const tree = disj();
+    if (i < src.length) stop('syntax');
+    return { tree, counted };
+  }
+  // A repeated part that can only ever match nothing (no way through it reads a code unit: only ^, $, \b, \B and
+  // empty groups, or a repeat of none) matches where it is as JavaScript reads it, however many times it is repeated:
+  // once when at least once is asked for, as it then holds or not there the same each time, and as nothing at all when
+  // none may be asked for. JavaScript takes no copy past the smaller number that matches nothing. So such a repeat is
+  // read as its part once, or as nothing, and is never written out. Each node is given none (it can only match
+  // nothing) and empty (it can match nothing, by some way through it).
+  function rxTrim(n) {
+    if (n.t === 'set') { n.none = n.empty = false; return n; }
+    if (n.t === 'as') { n.none = n.empty = true; return n; }
+    if (n.t === 'rep') {
+      const x = rxTrim(n.item);
+      if (n.max === 0 || (x.none && n.min === 0)) return { t: 'cat', items: [], none: true, empty: true };
+      if (x.none) return x;
+      n.item = x; n.none = false; n.empty = n.min === 0 || x.empty;
+      return n;
+    }
+    n.items = n.items.map(rxTrim);
+    n.none = n.items.every((x) => x.none);
+    n.empty = n.t === 'cat' ? n.items.every((x) => x.empty) : n.items.some((x) => x.empty);
+    return n;
+  }
+  // How many steps n comes to, counted until past RX_MOST: one for each code unit set and each assertion, a counted
+  // repeat's part as many times as it is written out, one more for each copy that may be left out, two more for
+  // * and the like, and two more for each |. After rxTrim every repeated part reads at least one code unit, so no
+  // count of copies, however large, is ever multiplied by nothing.
+  function rxSize(n) {
+    if (n.t === 'set' || n.t === 'as') return 1;
+    if (n.t === 'rep') { const b = Math.max(1, rxSize(n.item)); return n.min * b + (n.max === Infinity ? b + 2 : (n.max - n.min) * (b + 1)); }
+    let s = n.t === 'alt' ? 2 * (n.items.length - 1) : 0;
+    for (const x of n.items) { s += rxSize(x); if (!(s <= RX_MOST)) break; }
+    return s;
+  }
+  // The steps: CHAR (read one code unit of set a1), SPLIT (go on at a1, and at a2 after it), JMP (go on at a1),
+  // ASSERT (go on if assertion a1 holds here), IN and OUT (the start and the end of a copy of a repeated part that may
+  // be left out and can match nothing, a1 being how many such copies it is inside, itself included) and MATCH. An
+  // assertion looks at the kind of code unit on each side of where it is: 0 none (the start or the end), 1 a line
+  // end, 2 a word character, 3 any other.
+  // What a search says of a /regex/ it leaves out, for each why of rxCompile(), with what rxCompile gave. The pattern
+  // is said back as sent, cut after RX_SAID characters (an ellipsis ends it then), so that what follows it is read too.
+  const RX_SAID = 200, rxSaid = (src) => { const cps = Array.from(src); return cps.length > RX_SAID ? `${cps.slice(0, RX_SAID).join('')}\u2026` : src; };
+  const RX_LEFT_OUT = {
+    look: (src) => `/${rxSaid(src)}/ has a look-ahead or a look-behind, which this search does not read, so it was left out of the search. Write it without (?=, (?!, (?<= or (?<!, or search for its words in quotation marks.`,
+    back: (src) => `/${rxSaid(src)}/ has a back-reference, which this search does not read, so it was left out of the search. Write it without \\1 or \\k<name>, or search for its words in quotation marks.`,
+    big: (src, rx) => `/${rxSaid(src)}/ is longer than this search reads: it comes to more than ${RX_MOST} steps as this search counts them, so it was left out of the search. A counted repeat such as x{2,30} counts as 30 copies of x, and each | and each copy that may be left out counts more. ${rx && rx.counted ? 'Write it shorter, or with smaller counts.' : 'Write it shorter.'}`,
+    deep: (src) => `/${rxSaid(src)}/ has groups inside groups deeper than this search reads, so it was left out of the search. Write it with fewer groups.`,
+    syntax: (src) => `/${rxSaid(src)}/ is written in a way this search does not read, so it was left out of the search. To search for those characters as plain text, put them in quotation marks.`,
+  };
+  const RX_CHAR = 0, RX_SPLIT = 1, RX_JMP = 2, RX_ASSERT = 3, RX_MATCH = 4, RX_IN = 5, RX_OUT = 6, RX_AS = { bol: 0, bolm: 1, eol: 2, eolm: 3, wb: 4, nwb: 5 };
+  const RX_FRESH_NONE = 1 << 30;                         // find(): no copy begun where the thread is now
+  const rxHolds = (k, p, n) => (k === 0 ? p === 0 : k === 1 ? p <= 1 : k === 2 ? n === 0 : k === 3 ? n <= 1 : k === 4 ? (p === 2) !== (n === 2) : (p === 2) === (n === 2));
+  function rxCompile(src, flags) {
+    let tree, counted = false;
+    try {
+      ({ tree, counted } = rxParse(src, flags.includes('i'), flags.includes('m')));
+      tree = rxTrim(tree);
+      if (!(rxSize(tree) <= RX_MOST)) return { why: 'big', counted };
+    } catch (e) {
+      if (e && e.rxWhy) return { why: e.rxWhy };
+      if (e instanceof RangeError) return { why: 'deep' };         // groups inside groups deeper than this reader goes
+      throw e;
+    }
+    const op = [], a1 = [], a2 = [], dep = [], sets = [], setOf = new Map();
+    const put = (o, x = 0, y = 0) => { op.push(o); a1.push(x); a2.push(y); dep.push(depth); return op.length - 1; };
+    const aim = (s, greedy, out) => { if (greedy) { a1[s] = s + 1; a2[s] = out; } else { a1[s] = out; a2[s] = s + 1; } };
+    // A copy that may be left out, of a part that can match nothing: JavaScript does not take it when it matches
+    // nothing (find() follows that rule, between IN and OUT; test() needs no such rule, as the copy changes nothing).
+    // dep: how many such copies each step is inside (an IN and its OUT are inside their own).
+    let depth = 0;
+    const copy = (n) => {
+      if (!n.item.empty) { emit(n.item); return; }
+      put(RX_IN, ++depth); emit(n.item); put(RX_OUT, depth); depth--;
+    };
+    const emit = (n) => {
+      if (n.t === 'set') { const key = n.rs.join(' '); let k = setOf.get(key); if (k === undefined) { k = sets.length; sets.push(n.rs); setOf.set(key, k); } put(RX_CHAR, k); }
+      else if (n.t === 'as') put(RX_ASSERT, RX_AS[n.k]);
+      else if (n.t === 'cat') for (const x of n.items) emit(x);
+      else if (n.t === 'alt') {
+        const jumps = [];
+        n.items.forEach((x, k) => {
+          if (k === n.items.length - 1) { emit(x); return; }
+          const s = put(RX_SPLIT, op.length + 1);
+          emit(x); jumps.push(put(RX_JMP)); a2[s] = op.length;
+        });
+        for (const j of jumps) a1[j] = op.length;
+      } else {
+        for (let k = 0; k < n.min; k++) emit(n.item);
+        if (n.max === Infinity) { const s = put(RX_SPLIT); copy(n); put(RX_JMP, s); aim(s, n.greedy, op.length); return; }
+        const splits = [];
+        for (let k = n.min; k < n.max; k++) { splits.push(put(RX_SPLIT)); copy(n); }
+        for (const s of splits) aim(s, n.greedy, op.length);
+      }
+    };
+    try { emit(tree); } catch (e) { if (e instanceof RangeError) return { why: 'deep' }; throw e; }
+    put(RX_MATCH);
+    // Code units in classes: two are in one class when every set holds both or neither, and when each is a line end,
+    // a word character or neither (what an assertion looks at), so a class says all the reader needs of a code unit
+    const all = sets.concat([RX_LT, RX_WORD]), cuts = new Set([0, 65536]);
+    for (const rs of all) for (const [a, b] of rs) { cuts.add(a); cuts.add(b + 1); }
+    const pts = [...cuts].sort((x, y) => x - y), cmap = new Uint16Array(65536), sig = new Map(), keys = [], at = new Int32Array(all.length);
+    for (let k = 0; k + 1 < pts.length; k++) {
+      const c = pts[k];
+      let key = '';
+      for (let s = 0; s < all.length; s++) { const rs = all[s]; while (at[s] < rs.length && rs[at[s]][1] < c) at[s]++; key += at[s] < rs.length && rs[at[s]][0] <= c ? '1' : '0'; }
+      let id = sig.get(key);
+      if (id === undefined) { id = keys.length; sig.set(key, id); keys.push(key); }
+      cmap.fill(id, c, pts[k + 1]);
+    }
+    const K = keys.length, has = new Uint8Array(sets.length * K), kinds = new Uint8Array(K);
+    keys.forEach((key, c) => {
+      for (let s = 0; s < sets.length; s++) has[s * K + c] = key.charCodeAt(s) === 49 ? 1 : 0;
+      kinds[c] = key[sets.length] === '1' ? 1 : key[sets.length + 1] === '1' ? 2 : 3;
+    });
+    return new RxReader(Int32Array.from(op), Int32Array.from(a1), Int32Array.from(a2), Int32Array.from(dep), has, K, cmap, kinds);
+  }
+  class RxReader {
+    constructor(op, a1, a2, dep, has, K, cmap, kinds) {
+      Object.assign(this, { op, a1, a2, dep, has, K, cmap, kinds });
+      const L = op.length;
+      this.seen = new Int32Array(L); this.gen = 0; this.stack = new Int32Array(3 * L + 2);
+      this.seenAt = new Int32Array(L); this.base = null; this.met = null; this.sp = []; this.sf = []; this.work = 0;      // for find() and begin()
+      this.opens = new Map(); this.begins = new Map();  // the steps from the start, by what is on each side (opening(), begin())
+      this.most = Math.max(64, Math.min(1 << 16, Math.floor((1 << 21) / K)));      // states kept at once
+      this.clear();
+    }
+    bump() { if (++this.gen > 2e9) { this.seen.fill(0); this.seenAt.fill(0); if (this.met) this.met.fill(0); this.gen = 1; } return this.gen; }
+    clear() {                                           // states as they are met: each is the steps it is at, after a code unit of a kind
+      this.ids = new Map(); this.at = []; this.after = []; this.ends = []; this.held = 0;
+      this.room = Math.min(this.most, 256);             // room for states in trans, made larger as more are met, up to most
+      this.trans = new Int32Array(this.room * this.K).fill(-1);
+      this.start = this.state(Int32Array.of(0), 0);
+    }
+    state(pcs, after) {
+      const key = `${after} ${pcs.join(' ')}`;
+      let id = this.ids.get(key);
+      if (id !== undefined) return id;
+      if (this.at.length >= this.most || this.held > 1 << 22) { this.clear(); return this.state(pcs, after); }
+      if (this.at.length >= this.room) {
+        this.room = Math.min(this.most, this.room * 2);
+        const more = new Int32Array(this.room * this.K).fill(-1);
+        more.set(this.trans);
+        this.trans = more;
+      }
+      id = this.at.length;
+      this.at.push(pcs); this.after.push(after); this.ends.push(-1); this.ids.set(key, id); this.held += pcs.length;
+      return id;
+    }
+    // The steps reached from `from` without reading, between a code unit of kind prev and one of kind next: take(pc)
+    // for each that reads one, and true as soon as the pattern's end is reached
+    close(from, prev, next, take) {
+      const { op, a1, a2, seen, stack } = this, gen = this.bump();
+      let n = 0;
+      for (let k = from.length - 1; k >= 0; k--) stack[n++] = from[k];
+      while (n) {
+        const pc = stack[--n];
+        if (seen[pc] === gen) continue;
+        seen[pc] = gen;
+        const o = op[pc];
+        if (o === RX_CHAR) take(pc);
+        else if (o === RX_SPLIT) { stack[n++] = a2[pc]; stack[n++] = a1[pc]; }
+        else if (o === RX_JMP || o === RX_IN || o === RX_OUT) stack[n++] = o === RX_JMP ? a1[pc] : pc + 1;
+        else if (o === RX_ASSERT) { if (rxHolds(a1[pc], prev, next)) stack[n++] = pc + 1; }
+        else return true;
+      }
+      return false;
+    }
+    // close() from the start alone, before a code unit of class c after one of kind prev, worked out once for each
+    // kind and class: true when the pattern's end is reached, or else the steps that read c, in an Int32Array
+    opening(prev, c) {
+      const key = prev * this.K + c;
+      let o = this.opens.get(key);
+      if (o === undefined) {
+        const pcs = [], { K, has, a1 } = this;
+        o = this.close([0], prev, this.kinds[c], (pc) => { if (has[a1[pc] * K + c]) pcs.push(pc); }) ? true : Int32Array.from(pcs);
+        this.opens.set(key, o);
+      }
+      return o;
+    }
+    step(d, c) {                                        // the state after a code unit of class c in state d; -2: matched before it
+      const K = this.K, has = this.has, a1 = this.a1, next = [];
+      if (this.close(this.at[d], this.after[d], this.kinds[c], (pc) => { if (has[a1[pc] * K + c]) next.push(pc + 1); })) return (this.trans[d * K + c] = -2);
+      next.push(0);                                     // a match can start at every code unit
+      next.sort((x, y) => x - y);
+      const before = this.ids, id = this.state(Int32Array.from(next), this.kinds[c]);
+      if (before === this.ids) this.trans[d * K + c] = id;     // unless the states were cleared to make room
+      return id;
+    }
+    end(d) { if (this.ends[d] < 0) this.ends[d] = this.close(this.at[d], this.after[d], 0, () => {}) ? 1 : 0; return this.ends[d] === 1; }
+    test(s, a, b) {
+      const cmap = this.cmap, K = this.K;
+      let d = this.start, trans = this.trans, met = 0;
+      for (let i = a; i < b; i++) {
+        const c = cmap[s.charCodeAt(i)];
+        let t = trans[d * K + c];
+        if (t < 0) {
+          if (t === -2) return true;
+          // A line that keeps meeting states not met before is read on without keeping them: each is used once
+          if (++met > 64 && met * 4 > i - a) return this.walk(s, i, b, this.at[d], this.after[d]);
+          t = this.step(d, c);
+          if (t === -2) return true;
+          trans = this.trans;
+        }
+        d = t;
+      }
+      return this.end(d);
+    }
+    // test() from a, at the steps pcs after a code unit of kind prev: close() and step() in one, keeping no state.
+    // The steps from the start, where a match can begin at each code unit, are taken from opening(), so each code
+    // unit costs the threads that are live, not the whole pattern again.
+    walk(s, a, b, pcs, prev) {
+      const { op, a1, a2, cmap, K, has, kinds, seen, stack } = this, L = op.length;
+      let now = new Int32Array(L + 1), next = new Int32Array(L + 1), cn = 0;
+      for (let j = 0; j < pcs.length; j++) now[cn++] = pcs[j];
+      for (let i = a; i < b; i++) {
+        const c = cmap[s.charCodeAt(i)], k = kinds[c], open = this.opening(prev, c);      // before bump(): it can call close()
+        if (open === true) return true;
+        const gen = this.bump();
+        let m = 0, nn = 0;
+        for (let j = cn - 1; j >= 0; j--) stack[m++] = now[j];
+        while (m) {
+          const pc = stack[--m];
+          if (seen[pc] === gen) continue;
+          seen[pc] = gen;
+          const o = op[pc];
+          if (o === RX_CHAR) { if (has[a1[pc] * K + c]) next[nn++] = pc + 1; }
+          else if (o === RX_SPLIT) { stack[m++] = a2[pc]; stack[m++] = a1[pc]; }
+          else if (o === RX_JMP) stack[m++] = a1[pc];
+          else if (o === RX_ASSERT) { if (rxHolds(a1[pc], prev, k)) stack[m++] = pc + 1; }
+          else if (o === RX_IN || o === RX_OUT) stack[m++] = pc + 1;
+          else return true;
+        }
+        for (let j = 0; j < open.length; j++) { const pc = open[j]; if (seen[pc] !== gen) { seen[pc] = gen; next[nn++] = pc + 1; } }
+        [now, next] = [next, now]; cn = nn; prev = k;
+      }
+      const last = Array.from(now.subarray(0, cn));
+      last.push(0);
+      return this.close(last, prev, 0, () => {});
+    }
+    // find(): the steps reached from pc0 without reading, between code units of kinds prev and next, in the order
+    // JavaScript tries them: those that read a code unit, and the end, put in pcs from len on, unless reached already
+    // in this round (gen, in seen). As in JavaScript, a copy that may be left out is not taken when it reaches its OUT
+    // having read nothing. So a place is a step and fd, how many copies deep the outermost copy begun here is (none:
+    // RX_FRESH_NONE; never more than dep of the step), and each place is looked at once a round (in met, from base).
+    // No way back to a place leaves an OUT once an IN has been passed, so the places are tried in JavaScript's order.
+    // Gives the new len; this.work counts each place looked at.
+    reach(pcs, len, pc0, prev, next, gen, seen) {
+      const { op, a1, a2, sp, sf, base, met } = this;
+      let m = 1, work = 0;
+      sp[0] = pc0; sf[0] = RX_FRESH_NONE;
+      while (m) {
+        work++;
+        const pc = sp[--m], fd = sf[m], o = op[pc];
+        if (o === RX_CHAR || o === RX_MATCH) { if (seen[pc] !== gen) { seen[pc] = gen; pcs[len++] = pc; } continue; }
+        const at = base[pc] + (fd === RX_FRESH_NONE ? 0 : fd);
+        if (met[at] === gen) continue;
+        met[at] = gen;
+        if (o === RX_SPLIT) { sp[m] = a2[pc]; sf[m++] = fd; sp[m] = a1[pc]; sf[m++] = fd; }
+        else if (o === RX_JMP) { sp[m] = a1[pc]; sf[m++] = fd; }
+        else if (o === RX_ASSERT) { if (rxHolds(a1[pc], prev, next)) { sp[m] = pc + 1; sf[m++] = fd; } }
+        else if (o === RX_IN) { sp[m] = pc + 1; sf[m++] = Math.min(fd, a1[pc]); }
+        else if (fd > a1[pc]) { sp[m] = pc + 1; sf[m++] = RX_FRESH_NONE; }        // RX_OUT, of a copy that read something
+      }
+      this.work += work;
+      return len;
+    }
+    places() {                                          // made when find() is first called: test() needs none of it
+      if (this.base) return;
+      const { dep } = this, base = new Int32Array(dep.length);
+      let n = 0;
+      for (let pc = 0; pc < dep.length; pc++) { base[pc] = n; n += dep[pc] + 1; }
+      this.base = base; this.met = new Int32Array(n);
+    }
+    // reach() from the start alone, before a code unit of class c (-1: at the end) after one of kind prev, worked out
+    // once for each kind and class: the end of the pattern and the steps that read c, as reach() orders them (a step
+    // that does not read c ends there, and it is left out)
+    begin(prev, c) {
+      const key = prev * (this.K + 1) + c + 1;
+      let o = this.begins.get(key);
+      if (o === undefined) {
+        const { op, a1, K, has } = this, out = new Int32Array(op.length), n = this.reach(out, 0, 0, prev, c < 0 ? 0 : this.kinds[c], this.bump(), this.seenAt);
+        o = out.slice(0, n).filter((pc) => op[pc] === RX_MATCH || (c >= 0 && has[a1[pc] * K + c] === 1));
+        this.begins.set(key, o);
+      }
+      return o;
+    }
+    // Every thread at once, in the order JavaScript would try them, each with where it started: the first to reach
+    // the end of the pattern wins over every thread after it, and the threads before it go on for a later end. The
+    // steps from the start are put after the threads already there (begin()), less those they reached already.
+    find(s, from, most = Infinity) {
+      this.places();
+      const { op, a1, has, K, cmap, kinds, seen } = this, L = op.length, n = s.length;
+      const classAt = (p) => (p < 0 || p >= n ? -1 : cmap[s.charCodeAt(p)]);
+      let cpc = new Int32Array(L), cst = new Int32Array(L), npc = new Int32Array(L), nst = new Int32Array(L), cn = 0, matched = null;
+      let before = classAt(from - 1), here = classAt(from);
+      this.work = 0;
+      let gen = this.bump();
+      for (let i = from; i <= n; i++) {
+        const after = classAt(i + 1), prev = here < 0 ? 0 : kinds[here], next = after < 0 ? 0 : kinds[after];
+        this.work++;
+        if (matched === null) {
+          const open = this.begin(before < 0 ? 0 : kinds[before], here);      // its round is not this one: seen is kept
+          this.work += open.length;
+          for (let k = 0; k < open.length; k++) { const pc = open[k]; if (seen[pc] !== gen) { seen[pc] = gen; cpc[cn] = pc; cst[cn] = i; cn++; } }
+        }
+        const g = this.bump();
+        let nn = 0;
+        for (let k = 0; k < cn; k++) {
+          if (++this.work > most) { this.steps = this.work; return null; }
+          const pc = cpc[k];
+          if (op[pc] === RX_MATCH) { matched = [cst[k], i]; break; }
+          if (here >= 0 && has[a1[pc] * K + here]) { const was = nn; nn = this.reach(npc, nn, pc + 1, prev, next, g, seen); nst.fill(cst[k], was, nn); }
+        }
+        before = here; here = after;
+        if (this.work > most) { this.steps = this.work; return null; }
+        [cpc, npc] = [npc, cpc]; [cst, nst] = [nst, cst]; cn = nn; gen = g;
+        if (matched !== null && cn === 0) break;
+      }
+      this.steps = this.work;
+      return matched;
+    }
+  }
+
+  // ---------- case/incident_context.md ----------
+  // Which collector wrote it. Before 1.5.0 the collector put its own sentences there ("- Case:", "## Reported
+  // behavior", "## Best next capture") when a question was answered yes, which pressing Return also did; from 1.5.0
+  // the file holds only what whoever ran it gave ("- Collector started:" opens it). Told apart by what the file holds,
+  // not by the bundle, and line by line as the page's Markdown reader reads it, so that nothing inside a typed line
+  // or a path can pass for a line of its own. The page, the text commands and request mode all ask this one function.
+  // 'old' (an older collector's wording is in it), 'given' (this collector's file) or 'other'.
+  // A file is this collector's when it opens as this collector writes it (CONTEXT_OPENS: its title, a blank line, then
+  // "- Collector started:") and has no line of the older wording: from 1.5.0 the note and the path are each on a line
+  // of their own after four spaces, so this collector never writes one. A file that has both was not written as either
+  // collector writes it, and the older wording in it is said of as in any other file that has it (contextRead).
+  const CONTEXT_OPENS = (lines) => lines[0] === '# Incident context' && lines[1] === '' && /^- Collector started: /.test(lines[2] ?? '');
+  const OLD_LINE = (l) => /^- Case: /.test(l) || /^## (Reported behavior|Best next capture)\s*$/.test(l);
+  function contextKind(text) {
+    const lines = text.split(/\r?\n/);
+    if (lines.some(OLD_LINE)) return 'old';
+    return CONTEXT_OPENS(lines) ? 'given' : 'other';
+  }
+  // What is said once above the file, by which collector wrote it: the page, the text commands and request mode all
+  // say these sentences, from this one function. Before 1.5.0 the collector wrote sentences of its own into the file,
+  // which read as if someone had typed them: under two headings, for the case pivot-filter only. Its "Case" line held
+  // pivot-filter when its PivotTable question was answered yes, or whatever --case was given, which can be words
+  // somebody chose. So each part is said only when the file has it, found line by line as contextKind finds it, and
+  // the text under a heading is said to be the older collector's own only when it is word for word what that
+  // collector wrote there (OLD_SECTIONS, from its source): the file is the bundle's text, and anyone can have written
+  // other lines under the same heading. From 1.5.0 the file holds the --note line, which the collector checks against
+  // nothing, and the --workbook path, which it uses to read the workbook's facts. Each sentence is one of the fixed
+  // ones below, with only the fixed heading names put in: nothing of the file's own text is ever in one.
+  // { kind, said }: kind is 'given', 'old' (the Case line, or the text under one of the headings, is the older
+  // collector's) or 'other'; said is the sentences, in order.
+  const OLD_CASE_LINE = 'Collectors before 1.5.0 wrote the "Case" line in this file: pivot-filter when their question "Is this the crash when filtering a PivotTable?" was answered yes, which pressing Return also did, or what was given with --case.';
+  const OLD_SECTIONS = {
+    'Reported behavior': ['Excel crashes when a user filters within a PivotTable.'],
+    'Best next capture': ['If Excel freezes before it closes, run: sudo ./excel_diagnostics.sh hang --case pivot-filter',
+      'To capture the crash as it happens, run: sudo ./excel_diagnostics.sh repro --case pivot-filter, reproduce it, wait 30 seconds, then press Ctrl-C',
+      'After an immediate crash, run: sudo ./excel_diagnostics.sh collect --case pivot-filter --since YYYY-MM-DD --until YYYY-MM-DD', 'The workbook is not copied by this collector.'],
+  };
+  const GIVEN_SAID = 'The note in this file, where it has one, is from what whoever ran the collector typed or gave it, and the collector checked it against nothing it collected. Its workbook path, where it has one, is from the path that was given.';
+  const BOTH_SAID = 'This file opens as collectors from 1.5.0 on write it, with "- Collector started:" as its third line, and it also has lines that only collectors before 1.5.0 wrote, which collectors from 1.5.0 on never write.';
+  const headingsSaid = (names) => names.map((n) => `"${n}"`).join(' and ');      // at most the two headings
+  function contextRead(text) {
+    const kind = contextKind(text);
+    if (kind === 'given') return { kind, said: [GIVEN_SAID] };
+    if (kind !== 'old') return { kind, said: [] };
+    // Each heading's text runs to the next heading, as the page's Markdown reader finds one (one to six # and a space:
+    // a line such as "#", "#1" or "####### x" is text under the heading, and is compared with the rest); a heading that
+    // is in the file twice is the collector's only if the text under each is
+    const lines = text.split(/\r?\n/), caseLine = lines.some((l) => /^- Case: /.test(l)), word = new Map(), both = CONTEXT_OPENS(lines);
+    lines.forEach((l, k) => {
+      const h = /^## (Reported behavior|Best next capture)\s*$/.exec(l);
+      if (!h) return;
+      let end = k + 1;
+      while (end < lines.length && !/^#{1,6} /.test(lines[end])) end++;
+      const under = lines.slice(k + 1, end).filter((x) => x.trim()), want = OLD_SECTIONS[h[1]];
+      word.set(h[1], (word.get(h[1]) ?? true) && under.length === want.length && under.every((x, j) => x === want[j]));
+    });
+    const same = [...word].filter(([, w]) => w).map(([n]) => n), other = [...word].filter(([, w]) => !w).map(([n]) => n);
+    const said = [both ? BOTH_SAID : '', caseLine ? OLD_CASE_LINE : '',
+      same.length ? `The text under ${headingsSaid(same)} in this file is word for word what collectors before 1.5.0 wrote there for the case pivot-filter.` : '',
+      other.length ? `This file has the heading${other.length > 1 ? 's' : ''} ${headingsSaid(other)}, which collectors before 1.5.0 wrote for the case pivot-filter, and the text under ${other.length > 1 ? 'them' : 'it'} here is not what they wrote there.` : ''];
+    // both: the page titles such a file as neither collector's
+    return { kind: caseLine || same.length ? 'old' : 'other', said: said.filter(Boolean), ...(both ? { both } : {}) };
+  }
+
+  // ---------- the shape of a message ----------
+  // What a message has in common with others that differ from it only in what changes from one run to the next (a
+  // process ID, an address, a time, a request's UUID), so that entries can be counted by it. The rule is fixed:
+  //  - only the first SHAPE_READ characters of the message are read, and the shape of a longer one ends in an ellipsis;
+  //  - each run of white space (line breaks and tabs among it) is one space, and none is kept at either end;
+  //  - a word is a run of ASCII letters, digits and underscores. A UUID (hex digits in groups of 8, 4, 4, 4 and 12 joined
+  //    by hyphens) is one word. A word that is a UUID, 0x and hex digits, or hex digits only with a digit among them is
+  //    a number, and in any other word each run of digits is a number;
+  //  - each number is written #, and numbers joined by a single . : - / or , are one #: a time, a date, a version or an
+  //    address is one #. Everything else is kept as it is.
+  // Each character is looked at a fixed number of times (a UUID is looked for at the start of a word, 36 characters at
+  // most), and nothing is read past SHAPE_READ, so no message, however it was written, makes this slow.
+  const SHAPE_READ = 120, JOINS = new Set(['.', ':', '-', '/', ',']);
+  const wordAt = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+  const hexAt = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
+  const digitAt = (c) => c >= 48 && c <= 57;
+  const spaceAt = (c) => c <= 32 || c === 0x85 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
+  function uuidAt(s, i) {
+    if (i + 36 > s.length || (i + 36 < s.length && wordAt(s.charCodeAt(i + 36)))) return false;
+    for (let k = 0; k < 36; k++) {
+      const c = s.charCodeAt(i + k);
+      if (k === 8 || k === 13 || k === 18 || k === 23 ? c !== 45 : !hexAt(c)) return false;
+    }
+    return true;
+  }
+  function wordShape(s, a, b) {
+    let hex = true, digit = false;
+    for (let k = a; k < b; k++) { const c = s.charCodeAt(k); if (digitAt(c)) digit = true; else if (!hexAt(c)) hex = false; }
+    if (hex && digit) return '#';
+    if (b - a > 2 && s.charCodeAt(a) === 48 && (s.charCodeAt(a + 1) | 32) === 120) {
+      let all = true;
+      for (let k = a + 2; k < b && all; k++) all = hexAt(s.charCodeAt(k));
+      if (all) return '#';
+    }
+    if (!digit) return s.slice(a, b);
+    let w = '';
+    for (let k = a; k < b;) {
+      if (!digitAt(s.charCodeAt(k))) { w += s[k++]; continue; }
+      while (k < b && digitAt(s.charCodeAt(k))) k++;
+      w += '#';
+    }
+    return w;
+  }
+  function messageShape(msg) {
+    const s = String(msg);
+    let n = Math.min(s.length, SHAPE_READ);
+    if (n < s.length && s.charCodeAt(n - 1) >= 0xD800 && s.charCodeAt(n - 1) <= 0xDBFF) n--;      // not through the middle of a character
+    const t = s.slice(0, n), parts = [];
+    const put = (p) => {                                // a number joined to the number before it by one separator is that number
+      const k = parts.length;
+      if (p === '#' && k >= 2 && parts[k - 2] === '#' && JOINS.has(parts[k - 1])) parts.pop();
+      else parts.push(p);
+    };
+    for (let i = 0; i < n;) {
+      const c = t.charCodeAt(i);
+      if (spaceAt(c)) { while (i < n && spaceAt(t.charCodeAt(i))) i++; if (parts.length) parts.push(' '); continue; }
+      if (!wordAt(c)) { put(t[i++]); continue; }
+      if (uuidAt(t, i)) { put('#'); i += 36; continue; }
+      let j = i;
+      while (j < n && wordAt(t.charCodeAt(j))) j++;
+      put(wordShape(t, i, j));
+      i = j;
+    }
+    if (parts[parts.length - 1] === ' ') parts.pop();
+    return parts.join('') + (n < s.length ? '…' : '');
+  }
+
   // ---------- made-up sample bundle, so the page can be tried without real data ----------
   function sampleBundle(scale = 1) {
     let seed = 7;
@@ -1529,7 +2285,7 @@ const Core = (() => {
     return files;
   }
 
-  return { Dataset, sampleBundle, SEV, stamp, isoAt, offStr, readZip, Entry };
+  return { Dataset, sampleBundle, SEV, stamp, isoAt, offStr, timeBad, daysIn, TIME_FIRST, TIME_LAST, readZip, Entry, contextKind, contextRead, queryTerms, rxCompile, RX_MOST, messageShape, SHAPE_READ, levelSev };
 })();
 
 // ---------- worker entry point ----------
@@ -1550,6 +2306,7 @@ if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScop
     facts: () => ds.facts(),
     marks: () => ds.marks(),
     report: ({ path }) => ds.report(path),
+    contextRead: ({ text }) => Core.contextRead(text),
   };
   self.onmessage = async (ev) => {
     const { id, op, args } = ev.data;

@@ -11,7 +11,7 @@ import process from 'node:process';
 import zlib from 'node:zlib';
 import { Duplex } from 'node:stream';
 
-const VERSION = '1.1';
+const VERSION = '1.2';
 const SEV = Core.SEV;
 const VIEWER_URL = 'https://cadengithubb.github.io/Excel_Diagnostics/';
 
@@ -59,7 +59,8 @@ const BREAKS = new RegExp(`\\r\\n?|[\\n\\v\\f${String.fromCodePoint(0x85, 0x2028
 const PICTURE = /\p{Extended_Pictographic}/u;
 const pictured = (c) => c !== undefined && PICTURE.test(c);
 const toned = (c) => c !== undefined && (c.codePointAt(0) === 0xfe0f || (c.codePointAt(0) >= 0x1f3fb && c.codePointAt(0) <= 0x1f3ff));
-function roomless(s) {
+// Each character of s as roomless() writes it, one item for each: request mode cuts a line it prints at a character.
+function roomlessEach(s) {
   const cs = [...String(s)];
   return cs.map((c, i) => {
     const n = c.codePointAt(0);
@@ -67,16 +68,23 @@ function roomless(s) {
     const emoji = n === 0x200d ? pictured(cs[i + 1]) && (pictured(cs[i - 1]) || (toned(cs[i - 1]) && pictured(cs[i - 2])))
       : (n === 0xfe0e || n === 0xfe0f) && pictured(cs[i - 1]);
     return emoji ? c : `<U+${n.toString(16).toUpperCase().padStart(4, '0')}>`;
-  }).join('');
+  });
 }
+const roomless = (s) => roomlessEach(s).join('');
 const named = (s) => roomless(String(s).replace(BREAKS, '\\n').replace(/\t/g, '\\t'));
 // A command this tool suggests has to hold a name exactly, or it would not find the thing named. So a name goes
 // into one only when it is printed exactly as it is: one line, with nothing in it that has to be shown another way.
 // A suggestion that would need any other name is left out. A path given as an argument must also not read as an option.
 const plainHere = (s) => typeof s === 'string' && s.length > 0 && s.length <= 300 && named(s) === s && shown(s) === s;
 const plainArg = (s) => plainHere(s) && !s.startsWith('-');
-// A column value no wider than `most`, ending in ~ when it was cut (never through the middle of a character).
-const cutAt = (s, most) => (s.length <= most ? s : `${s.slice(0, s.charCodeAt(most - 2) >= 0xD800 && s.charCodeAt(most - 2) <= 0xDBFF ? most - 2 : most - 1)}~`);
+// A name from the bundle as a column value no wider than `most` as written, ending in ~ when it was cut: written as
+// namedEach() writes it (a line break as \n, a character that would act or takes no room by its number), and cut at
+// a whole item, so never through the middle of a character or of a character written by its number (<U+202E>, ^[).
+// tail is the column's own text after the name (a process ID in brackets), cut as if it were part of the name.
+function cutAt(s, most, tail = '') {
+  const items = [...namedEach(s), ...tail];
+  return items.join('').length <= most ? items.join('') : `${cutEach(items, most - 1)}~`;
+}
 
 // ---------- small helpers ----------
 const fmtN = (n) => Number(n).toLocaleString('en-US');
@@ -330,26 +338,86 @@ function zoneSaid() {
   if (!info.zone.length) return "UTC, because these logs do not record the Mac's time zone";
   return `the logged Mac's time zone, ${zoneOffsets()} (add --utc for UTC)`;
 }
-function parseTime(str, option) {
-  const s = String(str).trim();
-  let m = /^(\d{4})-(\d\d)-(\d\d)(?:[ T](\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,6}))?)?)?\s*(Z|UTC|[+-]\d\d:?\d\d)?$/i.exec(s);
-  if (!m) {
-    const tm = /^(\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,6}))?)?$/.exec(s), day = fmtTime(info.t0, false).slice(0, 10);
-    if (tm && day === fmtTime(info.t1, false).slice(0, 10)) m = [s, day.slice(0, 4), day.slice(5, 7), day.slice(8, 10), tm[1], tm[2], tm[3], tm[4]];
-    else if (tm) throw new Usage(`${option} ${s} has no date, and this bundle covers more than one day (${fmtTime(info.t0, false)} to ${fmtTime(info.t1, false)}). Write it like "${fmtTime(info.t1, false)}".`, { why: 'time-no-date', option, value: s, from: fmtTime(info.t0, false), to: fmtTime(info.t1, false) });
-  }
-  if (!m) {
-    const like = info.total ? fmtTime(info.t0, false) : '2026-03-10 09:15:00', zone = zoneSaid().replace(/ \(add.*/, '');
-    throw new Usage(`${option} "${s}" is not a time this tool can read. Write it like "${like}" (YYYY-MM-DD HH:MM:SS; seconds are optional, and so is the time of day). It is read in ${zone}, unless it ends in Z or an offset such as -05:00.`, { why: 'time', option, value: s, like, zone });
-  }
-  const naive = Date.UTC(+m[1], m[2] - 1, +m[3], +m[4] || 0, +m[5] || 0, +m[6] || 0, +String(m[7] || '0').padEnd(3, '0').slice(0, 3));
-  if (m[8]) return naive - (/^(z|utc)$/i.test(m[8]) ? 0 : Core.offStr(m[8])) * 60000;
+// A time as it is sent: YYYY-MM-DD, with a time of day after it or not, and Z, UTC or an offset after that or not;
+// or a time of day alone, on a bundle whose entries are all on one day. Each part has to be one that can be, by the
+// rules in Core.timeBad (src/core.js), which the page's From and To boxes also read times by: a month from 01 to 12,
+// a day that month has, an hour from 00 to 23, a minute and a second from 00 to 59, and an offset from -12:00 to
+// +14:00 with its minutes from 00 to 59. A part that is not is refused, with each such part said and an example made
+// from what was sent with those parts brought into range (outOfRange): left to Date, 2026-13-45 would be read as
+// 2027-02-14 and 10:99 as 11:39. So is a moment before TIME_FIRST or after TIME_LAST: any time between them is
+// written with a year of four digits on any clock, so a time this tool prints from it reads back here.
+// Request mode and the text commands both read times here.
+const TIME_SENT = /^(\d{4})-(\d\d)-(\d\d)(?:([ T])(\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,6}))?)?)?(\s*)(Z|UTC|[+-]\d\d:?\d\d)?$/i;
+const TIME_OF_DAY = /^(\d\d):(\d\d)(?::(\d\d)(?:\.(\d{1,6}))?)?$/;
+const { TIME_FIRST, TIME_LAST } = Core;
+// The parts of a time as TIME_SENT or TIME_OF_DAY took them (y, mo and d absent for a time of day) that cannot be, each
+// said as a clause, and the parts with each of them brought into range (an offset that cannot be is left out)
+function outOfRange(p) {
+  const { bad, zoneBad } = Core.timeBad(p), dated = p.y !== undefined, inMonth = Math.min(12, Math.max(1, +p.mo || 1));
+  const two = (v, most) => (v === undefined ? undefined : z2(Math.min(most, +v)));
+  const fixed = { ...p, h: two(p.h, 23), mi: two(p.mi, 59), s: two(p.s, 59), ...(zoneBad ? { z: undefined, gap: '' } : {}) };
+  if (dated) Object.assign(fixed, { mo: z2(inMonth), d: z2(Math.min(Core.daysIn(+p.y, inMonth), Math.max(1, +p.d))) });
+  return { bad, fixed, zoneBad };
+}
+// Parts written as a time again, in the shape they were sent in. The white space sent before an offset is written as
+// one space: it can be any (a line separator among it), and this is said back in a sentence.
+const timeWritten = (p) => {
+  const clock = p.h === undefined ? '' : `${p.h}:${p.mi}${p.s === undefined ? '' : `:${p.s}${p.frac === undefined ? '' : `.${p.frac}`}`}`;
+  return p.y === undefined ? clock : `${p.y}-${p.mo}-${p.d}${clock ? `${p.sep}${clock}` : ''}${p.z === undefined ? '' : `${p.gap ? ' ' : ''}${p.z}`}`;
+};
+// The moment parts in range stand for (a time of day alone, on the day `day`, YYYY-MM-DD), as UTC ms
+function momentOf(p, day) {
+  const [y, mo, d] = p.y !== undefined ? [+p.y, +p.mo, +p.d] : day.slice(0, 10).split('-').map(Number);
+  const at = new Date(0);
+  at.setUTCFullYear(y, mo - 1, d);                        // setUTCFullYear, not Date.UTC: that reads the years 0 to 99 as 1900 to 1999
+  at.setUTCHours(+p.h || 0, +p.mi || 0, +p.s || 0, +String(p.frac || '0').padEnd(3, '0').slice(0, 3));
+  const naive = at.getTime();
+  if (p.z) return naive - (/^(z|utc)$/i.test(p.z) ? 0 : Core.offStr(p.z)) * 60000;
   return naive - offsetAt(naive - offsetAt(naive) * 60000) * 60000;
 }
+// The window of half either side of the moment t, as [t0, t1), kept within the times this tool reads (TIME_FIRST to
+// TIME_LAST), so that its ends, printed, read back here; cut says whether an end was moved to stay within them. A
+// moment that is itself outside them (an entry's own time) has its window left as it is.
+function windowAround(t, half) {
+  const lo = t - half, hi = t + half + 1, inside = t >= TIME_FIRST && t <= TIME_LAST;
+  const t0 = inside ? Math.max(lo, TIME_FIRST) : lo, t1 = inside ? Math.min(hi, TIME_LAST) : hi;
+  return { t0, t1, cut: t0 > lo || t1 < hi };
+}
+// (at: how each end is written; request mode writes it with its offset where the bundle's clock has more than one)
+const windowCutSaid = (t0, t1, at = (t) => fmtTime(t, false)) => `reaches past the times this tool reads, 1000-01-02 00:00:00 to 9999-12-30 23:59:59 UTC, so it was cut to ${at(t0)} to ${at(t1)}`;
+const SPAN_ENDS = { early: ['it is before 1000-01-02 00:00:00 UTC, the earliest time this tool reads', '1000-01-02 00:00:00Z'], late: ['it is after 9999-12-30 23:59:59 UTC, the latest time this tool reads', '9999-12-30 23:59:59Z'] };
+const spanEnd = (t) => (t < TIME_FIRST ? SPAN_ENDS.early : t > TIME_LAST ? SPAN_ENDS.late : null);
+function parseTime(str, option) {
+  const s = String(str).trim(), m = TIME_SENT.exec(s), tm = m ? null : TIME_OF_DAY.exec(s);
+  const first = fmtTime(info.t0, false), last = fmtTime(info.t1, false), oneDay = first.slice(0, 10) === last.slice(0, 10);
+  const parts = m ? { y: m[1], mo: m[2], d: m[3], sep: m[4], h: m[5], mi: m[6], s: m[7], frac: m[8], gap: m[9], z: m[10] } : tm ? { h: tm[1], mi: tm[2], s: tm[3], frac: tm[4] } : null;
+  if (!parts) {
+    const like = info.total ? first : '2026-03-10 09:15:00', zone = zoneSaid().replace(/ \(add.*/, '');
+    throw new Usage(`${option} "${s}" is not a time this tool can read. Write it like "${like}" (YYYY-MM-DD HH:MM:SS; seconds are optional, and so is the time of day). It is read in ${zone}, unless it ends in Z or an offset such as -05:00.`, { why: 'time', option, value: s, like, zone });
+  }
+  // a time of day alone, on a bundle of more than one day, is given the bundle's last day, as the refusal below does
+  const dayless = !!tm && !oneDay && !!info.total, range = outOfRange(parts);
+  let t = range.bad.length || (tm && !oneDay) ? NaN : momentOf(parts, first);
+  const end = range.bad.length ? spanEnd(momentOf(range.fixed, dayless ? last : first)) : spanEnd(t);
+  if (range.bad.length || end) {
+    // the example is what was sent with its parts in range, unless that moment is outside the span this tool reads:
+    // then it is the end of that span nearest it
+    const like = end ? end[1] : `${dayless ? `${last.slice(0, 10)} ` : ''}${timeWritten(range.fixed)}`, bad = [...range.bad, ...(end ? [end[0]] : [])];
+    const zone = range.zoneBad && !end ? zoneSaid().replace(/ \(add.*/, '') : '', lead = range.bad.length ? `has ${range.bad.length > 1 ? 'parts' : 'a part'} out of range` : 'is outside the times this tool reads';
+    throw new Usage(`${option} "${named(s)}" ${lead}: ${bad.join('; ')}. Write it like "${like}".`, { why: 'time-range', option, value: s, like, bad, lead, zone, dayless: dayless && !end });
+  }
+  if (tm && !oneDay) throw new Usage(`${option} ${s} has no date, and this bundle covers more than one day (${first} to ${last}). Write it like "${last}".`, { why: 'time-no-date', option, value: s, from: info.t0, to: info.t1 });
+  return t;
+}
+// A length of time is at most SPAN_DAYS days: a time that far either side of any logged moment is still a date,
+// where one past the range of dates would be written as no time at all
+const SPAN_DAYS = 36500;
 function parseSpan(str, option) {
   const m = /^(\d+(?:\.\d+)?)\s*(ms|s|sec|m|min|h|d)?$/i.exec(String(str).trim());
   if (!m) throw new Usage(`${option} "${str}" is not a length of time. Write a number and a unit: 500ms, 30s, 5m, 2h or 1d.`, { why: 'span', option, value: String(str) });
-  return +m[1] * { ms: 1, s: 1000, sec: 1000, m: 60000, min: 60000, h: 3600000, d: 86400000 }[(m[2] || 's').toLowerCase()];
+  const ms = +m[1] * { ms: 1, s: 1000, sec: 1000, m: 60000, min: 60000, h: 3600000, d: 86400000 }[(m[2] || 's').toLowerCase()];
+  if (!(ms <= SPAN_DAYS * 86400000)) throw new Usage(`${option} "${str}" is longer than ${fmtN(SPAN_DAYS)} days, the longest this tool takes. Write a shorter one: 500ms, 30s, 5m, 2h or 1d.`, { why: 'span-long', option, value: String(str) });
+  return ms;
 }
 const fmtSpan = (ms) => (ms < 1000 ? `${Math.round(ms)} ms` : ms < 120e3 ? `${+(ms / 1000).toFixed(1)} s` : ms < 7200e3 ? `${+(ms / 60e3).toFixed(1)} min` : ms < 172800e3 ? `${+(ms / 3600e3).toFixed(1)} h` : `${+(ms / 86400e3).toFixed(1)} days`);
 function wholeNumber(v, option, min, max) {
@@ -402,9 +470,9 @@ async function buildQuery(o, pos) {
   if (o.to !== undefined) q.t1 = parseTime(o.to, '--to');
   if (q.t0 != null && q.t1 != null && q.t1 <= q.t0) throw new Usage(`--from (${fmtTime(q.t0)}) has to be earlier than --to (${fmtTime(q.t1)}).`, { why: 'from-after-to', from: q.t0, to: q.t1 });
   if (o.around !== undefined) {
-    const half = parseSpan(o.window === undefined ? '60s' : o.window, '--window'), c = await anchorTime(o.around, '--around');
-    q.t0 = c - half; q.t1 = c + half + 1;
-    said.window = `${fmtSpan(half)} either side of ${fmtTime(c)}`;
+    const half = parseSpan(o.window === undefined ? '60s' : o.window, '--window'), c = await anchorTime(o.around, '--around'), w = windowAround(c, half);
+    q.t0 = w.t0; q.t1 = w.t1; said.cut = w.cut;
+    said.window = `${fmtSpan(half)} either side of ${fmtTime(c)}${w.cut ? `; it ${windowCutSaid(w.t0, w.t1)}` : ''}`;
   } else if (q.t0 != null || q.t1 != null) {
     said.window = `${q.t0 != null ? `from ${fmtTime(q.t0)}` : 'from the start'} ${q.t1 != null ? `to ${fmtTime(q.t1)}` : 'to the end'}`;
   }
@@ -443,8 +511,8 @@ function printRows(rows, { wide, mark } = {}) {
     let msg = flat(r[9]);
     if (!wide && msg.length > 220) msg = `${msg.slice(0, 220)}... [+${fmtN(msg.length - 220)} characters; --wide or "show ${r[0]}" has the rest]`;
     else if (r[10]) msg += ` ... [cut at 2,048 bytes; "show ${r[0]}" has the rest]`;
-    const proc = named(N.proc[r[4]] || '-') + (r[5] ? `[${r[5]}]` : '');
-    return [(r[0] === mark ? '>' : '') + r[0], fmtTime(r[1]), cutAt(named(N.lvl[r[3]] || SEV[info.lvlSev[r[3]]]), LEVEL_WIDE), cutAt(named(info.sources[r[2]].short), SOURCE_WIDE), cutAt(proc, PROCESS_WIDE), msg];
+    return [(r[0] === mark ? '>' : '') + r[0], fmtTime(r[1]), cutAt(N.lvl[r[3]] || SEV[info.lvlSev[r[3]]], LEVEL_WIDE), cutAt(info.sources[r[2]].short, SOURCE_WIDE),
+      cutAt(N.proc[r[4]] || '-', PROCESS_WIDE, r[5] ? `[${r[5]}]` : ''), msg];
   });
   const w = [idW, 23, ...[2, 3, 4].map((k) => cells.reduce((a, c) => Math.max(a, c[k].length), k === 2 ? 5 : 6))];
   say(['ID'.padStart(w[0]), 'TIME'.padEnd(w[1]), 'LEVEL'.padEnd(w[2]), 'SOURCE'.padEnd(w[3]), 'PROCESS[PID]'.padEnd(w[4]), 'MESSAGE'].join('  '));
@@ -483,7 +551,7 @@ async function sayWhyNothing(q, r, said, o) {
 // ---------- what the commands work out, apart from how they say it (request mode says the same things as data) ----------
 const collectorMode = (name) => (/^Excel_Diagnostics_(collect|hang|repro|watch)_/.exec(name) || [])[1];
 function saySources(indent, num) {                        // one line per log source on the timeline; returns how many it left out
-  const src = info.sources.filter((s) => s.rows), short = (s) => cutAt(named(s.short), SOURCE_WIDE), w = src.reduce((a, s) => Math.max(a, short(s).length), 6);
+  const src = info.sources.filter((s) => s.rows), short = (s) => cutAt(s.short, SOURCE_WIDE), w = src.reduce((a, s) => Math.max(a, short(s).length), 6);
   say(`${indent}${'ENTRIES'.padStart(9)}  ${'SOURCE'.padEnd(w)}  ${'FIRST'.padEnd(19)}  ${'LAST'.padEnd(19)}  FILE`);
   for (const s of src.slice(0, 40)) say(`${indent}${num(s.rows).padStart(9)}  ${short(s).padEnd(w)}  ${fmtTime(s.t0, false)}  ${fmtTime(s.t1, false)}  ${named(s.path)}`);
   return Math.max(0, src.length - 40);
@@ -493,11 +561,39 @@ function reportKinds() {                                  // kind -> how many re
   for (const x of info.reports) kinds.set(x.kind, (kinds.get(x.kind) || 0) + 1);
   return kinds;
 }
-function sayReports(list) {
-  const kind = (x) => named(x.kind), proc = (x) => named(x.proc || '-');
-  const kw = list.reduce((a, x) => Math.max(a, kind(x).length), 4), pw = Math.min(30, list.reduce((a, x) => Math.max(a, proc(x).length), 7));
-  say(`${'TIME'.padEnd(19)}  ${'KIND'.padEnd(kw)}  ${'PROCESS'.padEnd(pw)}  FILE`);
-  for (const x of list) say(`${fmtTime(x.t, false)}  ${kind(x).padEnd(kw)}  ${proc(x).slice(0, pw).padEnd(pw)}  ${named(x.path)}`);
+// A report about Excel itself: one whose process is Microsoft Excel and whose kind is a crash, hang or spin. The
+// collector's own capture of Excel in hang mode (excel_spindump.txt or excel_sample.txt, captureAt in the engine) is
+// not one: the collector took it, and the Mac wrote nothing when something happened.
+const excelReport = (x) => x.proc === 'Microsoft Excel' && ['Crash', 'Hang', 'Spin'].includes(x.kind) && !ds.captureAt(x.path);
+// What is said once above case/incident_context.md, by which collector wrote it: the engine's sentences
+// (Core.contextRead, which the page asks too, so the two never say it differently). caseRead gives them and the kind
+// the summary names: an older collector's file is one whose Case line, or the text under one of whose headings, is
+// that collector's.
+const CASE_FILE = 'case/incident_context.md';
+function caseRead(text) {
+  const { kind, said } = Core.contextRead(text);
+  return { kind, said: said.join(' ') };
+}
+const caseSaid = (text) => caseRead(text).said;
+// One line per report. With ids, each line starts with the id of the report's own entry on the timeline (request
+// mode, where that id is what show and context take), as a listing of entries does. A character in a name that would
+// act or turn the line round is written by its number here as well as at the terminal (shown), so that request mode,
+// whose lines reach a model without passing a terminal, says it the same way.
+// The PROCESS column is cut at 30 characters as written, at a whole character, and a name cut ends in ~ (cutAt), as
+// in every other listing: a character written by its number (<U+202E>, ^[) is kept whole or left out whole, never cut
+// through (namedEach gives each as one item).
+const namedEach = (s) => roomlessEach(String(s).replace(BREAKS, '\n')).map((c) => (c === '\n' ? '\\n' : c === '\t' ? '\\t' : shown(c)));
+function cutEach(items, most) {
+  let out = '';
+  for (const c of items) { if (out.length + c.length > most) break; out += c; }
+  return out;
+}
+function sayReports(list, ids) {
+  const kind = (x) => shown(named(x.kind)), proc = (x) => namedEach(x.proc || '-'), id = (x) => (x.pos === undefined ? '-' : String(x.pos));
+  const kw = list.reduce((a, x) => Math.max(a, kind(x).length), 4), pw = Math.min(30, list.reduce((a, x) => Math.max(a, proc(x).join('').length), 7));
+  const iw = ids ? list.reduce((a, x) => Math.max(a, id(x).length), 2) : 0, lead = (s) => (ids ? `${s.padStart(iw)}  ` : '');
+  say(`${lead('ID')}${'TIME'.padEnd(19)}  ${'KIND'.padEnd(kw)}  ${'PROCESS'.padEnd(pw)}  FILE`);
+  for (const x of list) say(`${lead(id(x))}${fmtTime(x.t, false)}  ${kind(x).padEnd(kw)}  ${cutAt(x.proc || '-', pw).padEnd(pw)}  ${shown(named(x.path))}`);
 }
 
 // What entries can be counted by, as the engine names each, and the search field that picks one of its values out.
@@ -515,24 +611,38 @@ const MATCHES = { tag: 'with a tag that contains', process: 'whose process name 
   level: 'whose level or severity starts with', source: 'from every log whose path or source name contains' };
 function largest(r, q, field, n) {                        // the n values of a field with the most matches: [[value id, entries]], and how many values there are
   const f = r.facets[BY[field]];
+  // The engine gives the page every file of a bundle of 80 or fewer in the files' own order, and no more than 60 of
+  // them: past 60, the ones it gives are the first, not the ones with the most matches. Those are counted here, from
+  // the matches themselves (ds.view, which the query that gave r left).
+  if (BY[field] === 'file' && f.all > f.values.length) {
+    const per = new Map(), F = ds.g.F, v = ds.view;
+    for (let k = 0; k < v.length; k++) per.set(F[v[k]], (per.get(F[v[k]]) || 0) + 1);
+    return { vals: [...per].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, n), all: per.size };
+  }
   const vals = f.values.filter(([v, c]) => c > 0 && (BY[field] !== 'lvl' || !q.levelOk || q.levelOk.has(v)));
   return { vals: vals.slice().sort((a, b) => b[1] - a[1]).slice(0, n), all: vals.length < f.values.length ? vals.length : f.all };
 }
 
 // The stretch of the timeline around an entry or a moment: entries a up to (not including) b, and the one to mark.
 // With a window that is everything inside it, however many; the caller decides how much of it to show.
+// A moment that is a report's own time is about that report, so its entry is the one marked (report), not the first
+// of whatever else was logged in that second: it is the last of them, as the reports are the last source merged.
+// Reports print their times to the second, so a time sent without a fraction is a report's when the report is in
+// that second. Of two reports at one time, one about Excel itself is taken first.
 async function stretch(anchor, isId, before, after, window) {
-  let id, t;
+  let id, t, report = null;
   if (isId) { id = +anchor; t = await anchorTime(anchor, 'context'); }
   else {
     t = parseTime(anchor, 'context');
     await ds.query({ bins: 1 }, () => {});
-    id = ds.seek(t);
+    report = info.reports.filter((x) => x.pos !== undefined && (x.t === t || (t % 1000 === 0 && x.t > t && x.t < t + 1000)))
+      .sort((x, y) => excelReport(y) - excelReport(x) || x.pos - y.pos)[0] || null;
+    id = report ? report.pos : ds.seek(t);
   }
-  if (window === undefined) return { id, t, a: Math.max(0, id - before), b: Math.min(info.total, id + after + 1) };
-  const half = parseSpan(window, '--window'), r = await ds.query({ t0: t - half, t1: t + half + 1, bins: 1 }, () => {});
+  if (window === undefined) return { id, t, report, a: Math.max(0, id - before), b: Math.min(info.total, id + after + 1) };
+  const half = parseSpan(window, '--window'), w = windowAround(t, half), r = await ds.query({ t0: w.t0, t1: w.t1, bins: 1 }, () => {});
   const a = r.count ? ds.view[0] : 0, b = a + r.count;      // with no filter the matches are one unbroken run of the timeline
-  return { id: r.count ? Math.min(Math.max(id, a), b - 1) : id, t, half, a, b };
+  return { id: r.count ? Math.min(Math.max(id, a), b - 1) : id, t, report, half, a, b, t0: w.t0, t1: w.t1, cut: w.cut };
 }
 
 const onTimeline = (x) => (x.src >= 0 && x.rows ? x.rows : 0);      // how many timeline entries a bundle file gives
@@ -570,18 +680,25 @@ const OWN_MEMORY = /^(?:system\/memory\.txt|(?:repro\/[^/]+\/)?(?:system_memory|
 const memoryFiles = () => MEMORY_FILES.map(([kind, title, rx]) => ({ kind, title, files: info.files.filter((f) => f.size && rx.test(f.path) && (!ds.collector || OWN_MEMORY.test(f.path))) })).filter((g) => g.files.length);
 const MEMORY_COLUMNS = [['excel_footprint_mb', ' MB'], ['excel_cpu_pct', '%'], ['excel_threads', ''], ['free_mb', ' MB'], ['swap_used_mb', ' MB']];
 const PRESSURE = { 1: 'normal', 2: 'warning', 4: 'critical' };
+// A cell written as a decimal number is that number; any other (0x10, 1e999, Infinity, 12abc, words) is not one
+const DECIMAL = /^-?\d{1,15}(\.\d{1,15})?$/;
+const decimal = (v) => { const t = String(v ?? '').trim(); return DECIMAL.test(t) ? +t : NaN; };
 // For each of those columns: the sample (a row of the file) with its lowest value, the one with its highest, and
-// the last value. Also the pressure levels and the Excel process IDs seen (null when the file has no such column).
+// the last value, of the cells that are decimal numbers. Also the pressure levels and the Excel process IDs seen (null
+// when the file has no such column). No more than TIMELINE_BYTES of the file is read: a longer one ends inside a row
+// where it was cut, and that part of a row is not a sample, so it is left out, and `cut` says the file was longer.
+const TIMELINE_BYTES = 16 << 20;
 async function memoryTimeline(csv) {
-  const rows = new TextDecoder().decode((await ds.fileChunk(csv.i, 0, 16 << 20)).bytes).split(/\r?\n/).filter(Boolean), head = (rows[0] || '').split(',');
+  const got = await ds.fileChunk(csv.i, 0, TIMELINE_BYTES), cut = got.size > TIMELINE_BYTES, text = new TextDecoder().decode(got.bytes);
+  const rows = (cut ? text.slice(0, text.lastIndexOf('\n') + 1) : text).split(/\r?\n/).filter(Boolean), head = (rows[0] || '').split(',');
   const col = (name) => head.indexOf(name), data = rows.slice(1).map((l) => l.split(',')), stats = [];
   for (const [name, unit] of MEMORY_COLUMNS) {
-    const k = col(name), vals = data.map((d) => [parseFloat(d[k]), d]).filter((v) => v[0] === v[0]);
+    const k = col(name), vals = data.map((d) => [decimal(d[k]), d]).filter((v) => v[0] === v[0]);
     if (k < 0 || !vals.length) continue;
     stats.push({ name, unit, lo: vals.reduce((a, v) => (v[0] < a[0] ? v : a)), hi: vals.reduce((a, v) => (v[0] > a[0] ? v : a)), last: vals[vals.length - 1][0] });
   }
   const lv = col('pressure_level'), pid = col('excel_pid');
-  return { data, col, stats, levels: lv < 0 ? [] : [...new Set(data.map((d) => d[lv]).filter(Boolean))], pids: pid < 0 ? null : [...new Set(data.map((d) => d[pid]).filter(Boolean))] };
+  return { data, col, stats, cut, levels: lv < 0 ? [] : [...new Set(data.map((d) => d[lv]).filter(Boolean))], pids: pid < 0 ? null : [...new Set(data.map((d) => d[pid]).filter(Boolean))] };
 }
 
 // ---------- where "export" writes ----------
@@ -790,17 +907,20 @@ const COMMANDS = {
     if (pos.length > 1) throw new Usage(`"context" takes one entry ID or one time (put a time in quotation marks). To filter what is shown around a moment, use: ${run(`search WORDS --around ${shq(pos[0])} --window 1m`)}`);
     const before = o.before === undefined ? 10 : wholeNumber(o.before, '--before', 0, 2000), after = o.after === undefined ? 10 : wholeNumber(o.after, '--after', 0, 2000);
     const exact = /^\d+$/.test(pos[0]);
-    let { id, t, half, a, b } = await stretch(pos[0], exact, before, after, o.window);
+    let { id, t, half, a, b, report, t0, t1, cut } = await stretch(pos[0], exact, before, after, o.window);
     if (o.window !== undefined) {
-      if (a === b) { say(`Nothing was logged within ${fmtSpan(half)} either side of ${fmtTime(t)}. A longer --window, or no --window at all, shows the nearest entries.`); return; }
+      // A window cut to the times this tool reads is said as the window it was cut to
+      const within = cut ? 'within that window' : `within ${fmtSpan(half)} either side`;
+      if (cut) say(`The window of ${fmtSpan(half)} either side of ${fmtTime(t)} ${windowCutSaid(t0, t1)}.`);
+      if (a === b) { say(`The bundle holds no entry ${cut ? within : `${within} of ${fmtTime(t)}`}. A longer --window, or no --window at all, shows the nearest entries.`); return; }
       if (b - a > 2000) {
-        say(`${fmtN(b - a)} entries fall within ${fmtSpan(half)} either side; the 2,000 nearest are shown. A shorter --window, or "search" with --around, narrows it.`);
+        say(`${fmtN(b - a)} entries fall ${within}; the 2,000 nearest are shown. A shorter --window, or "search" with --around, narrows it.`);
         a = Math.max(a, id - 1000); b = Math.min(b, a + 2000);
       }
     }
     const rows = (await ds.readRows(Array.from({ length: b - a }, (_, i) => a + i), 2048)).map((x) => x.row);
     say(exact ? `Entries ${fmtN(a)} to ${fmtN(b - 1)}: everything logged around entry ${id}, from every source, with no filter. Entry ${id} is marked with >.`
-      : `Entries ${fmtN(a)} to ${fmtN(b - 1)}: everything logged around ${fmtTime(t)}, from every source, with no filter. The first entry at or after that time is marked with >.`);
+      : `Entries ${fmtN(a)} to ${fmtN(b - 1)}: everything logged around ${fmtTime(t)}, from every source, with no filter. ${report ? `The entry of the report recorded at ${fmtTime(report.t)}` : 'The first entry at or after that time'} is marked with >.`);
     say(`Times are in ${zoneSaid()}.`);
     say(); printRows(rows, { wide: o.wide, mark: id });
     say(); say('Next:');
@@ -818,7 +938,7 @@ const COMMANDS = {
       return;
     }
     say(`${plural(list.length, 'report')} in this bundle, oldest first. Times are in ${zoneSaid()}.`);
-    say('Each is one file that macOS or Excel wrote when the thing happened; KIND is taken from the file.');
+    say('Each is a report as its file records it, and KIND is taken from the file. A force-quit file can record more than one, and excel_sample.txt and excel_spindump.txt are read as the capture of Excel that the collector takes in hang mode.');
     say(); sayReports(list);
     const x = list[list.length - 1];
     say(); say('Next (shown for the newest report):');
@@ -857,6 +977,8 @@ const COMMANDS = {
       say(ODL.test(f.path) ? ODL_SAID : 'This is a binary file, so it is not printed. Its place on disk, when the bundle is a folder, is the same path under the bundle folder.');
       return;
     }
+    const aboutCase = f.path === CASE_FILE ? caseSaid(all.join('\n')) : '';
+    if (aboutCase) say(aboutCase);
     let from = 1, to = o.all ? all.length : Math.min(all.length, 200);
     if (o.lines !== undefined) {
       const m = /^(\d+)(?:-(\d+)?)?$/.exec(o.lines);
@@ -896,11 +1018,12 @@ const COMMANDS = {
     for (const [title, files] of groups) { say(); say(`${title}:`); for (const f of files.slice(0, 12)) say(`  ${fmtBytes(f.size).padStart(10)}  ${named(f.path)}`); if (files.length > 12) say(`  ... and ${fmtN(files.length - 12)} more`); }
     const csv = (memoryFiles().find((g) => g.kind === 'timeline') || { files: [] }).files[0];
     if (csv) {
-      const { data, stats, levels, pids } = await memoryTimeline(csv);
-      say(); say(`${named(csv.path)}: ${plural(data.length, 'sample')}${data.length ? `, from ${data[0][0]} to ${data[data.length - 1][0]} (the Mac's local time, as written in the file)` : ''}`);
-      for (const s of stats) say(`  ${s.name}: lowest ${fmtN(s.lo[0])}${s.unit} at ${s.lo[1][0]}, highest ${fmtN(s.hi[0])}${s.unit} at ${s.hi[1][0]}, last ${fmtN(s.last)}${s.unit}`);
-      if (levels.length) say(`  pressure_level values seen: ${levels.map((v) => `${v} (${PRESSURE[v] || 'unknown'})`).join(', ')}`);
-      if (pids) say(`  Excel process IDs seen: ${pids.length ? pids.join(', ') : 'none (Excel was not running at any sample)'}`);
+      const { data, stats, levels, pids, cut } = await memoryTimeline(csv);
+      // every cell is the file's text: one line each, with what takes no room written by its number (named)
+      say(); say(`${named(csv.path)}: ${plural(data.length, 'sample')}${cut ? ` in its first ${fmtBytes(TIMELINE_BYTES)}, all that was read` : ''}${data.length ? `, from ${named(data[0][0])} to ${named(data[data.length - 1][0])} (the Mac's local time, as written in the file)` : ''}`);
+      for (const s of stats) say(`  ${s.name}: lowest ${fmtN(s.lo[0])}${s.unit} at ${named(s.lo[1][0])}, highest ${fmtN(s.hi[0])}${s.unit} at ${named(s.hi[1][0])}, last ${fmtN(s.last)}${s.unit}`);
+      if (levels.length) say(`  pressure_level values seen: ${levels.map((v) => `${named(v)} (${Object.hasOwn(PRESSURE, v) ? PRESSURE[v] : 'unknown'})`).join(', ')}`);
+      if (pids) say(`  Excel process IDs seen: ${pids.length ? pids.map(named).join(', ') : 'none (Excel was not running at any sample)'}`);
     }
     say(); say(`Log entries tagged memory (kernel memory-pressure and jetsam messages): ${fmtN(tagged)}`);
     say(); say('Next:');
